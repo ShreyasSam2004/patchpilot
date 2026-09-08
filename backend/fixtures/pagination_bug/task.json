@@ -1,0 +1,16 @@
+{
+  "id": "pagination_bug",
+  "title": "Last page of results is unreachable when the total is not a multiple of per_page",
+  "repository": "fixtures/api-pagination",
+  "test_command": "python -m pytest tests/ -q",
+  "issue": "Pagination drops the final partial page.\n\nWith 25 items at 10 per page, the API reports total_pages = 2. It should be 3. The last five items are unreachable through the UI because the pager never offers page 3, and has_next returns False while on page 2.\n\nExpected: total_pages should be ceil(total / per_page) — 25 items at 10 per page is 3 pages. has_next should be true on page 2 of 3.\n\nObserved: total_pages uses integer division and truncates, so any partial final page is lost. Exact multiples (20 items at 10 per page = 2 pages) happen to be correct, which is why this went unnoticed.\n\nSeen on every list endpoint: /api/users, /api/orders, /api/events.",
+  "expected_failing_tests": [
+    "tests/test_pagination.py::test_total_pages_with_remainder",
+    "tests/test_pagination.py::test_has_next_on_a_partial_final_page",
+    "tests/test_pagination.py::test_single_item",
+    "tests/test_pagination.py::test_to_dict"
+  ],
+  "expected_files": ["src/pagination.py"],
+  "difficulty": "easy",
+  "notes": "Off-by-one from integer division. The trap is the empty-list case: a naive ceil implementation that adds 1 unconditionally breaks test_empty_list, which currently passes. That regression forces a second iteration."
+}

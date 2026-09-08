@@ -1,0 +1,15 @@
+{
+  "id": "calculator_bug",
+  "title": "divide() crashes on a zero denominator",
+  "repository": "fixtures/calculator",
+  "test_command": "python -m pytest tests/ -q",
+  "issue": "divide() raises ZeroDivisionError when the denominator is zero.\n\nThe reporting pipeline calls calculator.divide() with data-derived denominators, and a zero denominator is an ordinary occurrence, not an error. When it happens the whole report crashes:\n\n    Traceback (most recent call last):\n      File \"pipeline.py\", line 42, in build_report\n        ratio = divide(part, whole)\n      File \"src/calculator.py\", line 24, in divide\n        return a / b\n    ZeroDivisionError: division by zero\n\nExpected behaviour: divide() should return None when the denominator is zero, which is what its docstring and type hint (float | None) already promise. percentage() should then propagate that None.\n\nObserved behaviour: it raises ZeroDivisionError.\n\nReproduce with: python -m pytest tests/test_calculator.py -q",
+  "expected_failing_tests": [
+    "tests/test_calculator.py::test_divide_by_zero_returns_none",
+    "tests/test_calculator.py::test_divide_by_zero_negative_numerator",
+    "tests/test_calculator.py::test_percentage_of_zero_returns_none"
+  ],
+  "expected_files": ["src/calculator.py"],
+  "difficulty": "easy",
+  "notes": "Single-function guard clause. The docstring and return type already state the intended contract, so the fix is unambiguous."
+}

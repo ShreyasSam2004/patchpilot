@@ -1,0 +1,78 @@
+[project]
+name = "patchpilot"
+version = "0.1.0"
+description = "PatchPilot — autonomous software-engineering agent with iterative test feedback and SWE-bench Lite evaluation"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20",
+    "greenlet>=3.1",
+    "httpx>=0.27",
+    "structlog>=24.4",
+    "typer>=0.15",
+    "rich>=13.9",
+    "python-dotenv>=1.0",
+    "unidiff>=0.7.5",
+    "sse-starlette>=2.1",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.55"]
+postgres = ["asyncpg>=0.30"]
+mcp = ["mcp>=1.1"]
+swebench = ["swebench>=3.0", "datasets>=3.0"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-requests",
+]
+
+[project.scripts]
+patchpilot = "patchpilot.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["patchpilot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["fixtures", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["B008", "RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_unused_ignores = false
+exclude = ["fixtures/", "\\.venv/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: end-to-end agent loop tests (slower)",
+    "docker: requires a running Docker daemon",
+    "live: requires real model API credentials",
+]

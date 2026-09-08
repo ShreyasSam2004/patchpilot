@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# PatchPilot runtime state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/data/
+/workspaces/
+/logs/
+backend/logs/
+backend/data/
+backend/workspaces/
+backend/.patchpilot/
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db

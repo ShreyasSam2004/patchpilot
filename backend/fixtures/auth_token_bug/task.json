@@ -1,0 +1,14 @@
+{
+  "id": "auth_token_bug",
+  "title": "Login endpoint returns 500 when refresh token has expired",
+  "repository": "fixtures/session-service",
+  "test_command": "python -m pytest tests/ -q",
+  "issue": "Refreshing a session with an expired refresh token returns HTTP 500 instead of 401.\n\nSteps to reproduce:\n1. Issue a refresh token with a TTL that has already passed.\n2. Call refresh_session() with that token.\n3. The response is {\"status\": 500, \"body\": {\"error\": \"internal_error\", ...}}.\n\nExpected: an expired refresh token is a client problem, not a server fault. The endpoint should return 401 like every other rejected token. Our monitoring is paging on-call for these, and the client SDK only knows to re-authenticate on a 401.\n\nNote that verify_refresh_token() already raises ExpiredTokenError, and every TokenError subclass already carries the right status_code. The HTTP layer is not using it.\n\nThe same problem affects the logout endpoint.",
+  "expected_failing_tests": [
+    "tests/test_token.py::test_expired_token_is_401_not_500",
+    "tests/test_token.py::test_expired_token_on_logout_is_401_not_500"
+  ],
+  "expected_files": ["src/auth/api.py"],
+  "difficulty": "medium",
+  "notes": "Requires reading two files: the exception hierarchy in token.py and the handler in api.py. ExpiredTokenError is a sibling of InvalidTokenError, not a subclass, so the narrow except clause misses it and the generic handler turns it into a 500. Fixing it in one endpoint but not the other leaves a test failing, which forces a second iteration."
+}
