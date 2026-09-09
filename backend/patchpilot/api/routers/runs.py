@@ -81,6 +81,7 @@ async def create_run(
         provider=payload.provider,
         model=payload.model,
         sandbox=payload.sandbox,
+        docker_image=payload.docker_image,
         max_iterations=payload.max_iterations,
         max_tool_calls=payload.max_tool_calls,
         max_runtime_s=payload.max_runtime_s,

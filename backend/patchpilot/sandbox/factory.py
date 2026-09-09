@@ -37,6 +37,8 @@ async def create_sandbox(
     kind: str | None = None,
     allow_fallback: bool = False,
     name: str | None = None,
+    image: str | None = None,
+    pull_if_missing: bool = False,
 ) -> Sandbox:
     """Create and start a sandbox for ``root``.
 
@@ -49,7 +51,11 @@ async def create_sandbox(
     if requested == "docker":
         try:
             sandbox: Sandbox = DockerSandbox(
-                root, limits, image=settings.docker_image, container_name=name
+                root,
+                limits,
+                image=image or settings.docker_image,
+                container_name=name,
+                pull_if_missing=pull_if_missing,
             )
             await sandbox.start()
             return sandbox

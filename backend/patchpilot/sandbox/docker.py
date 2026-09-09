@@ -97,9 +97,11 @@ class DockerSandbox(Sandbox):
         *,
         image: str = "python:3.11-slim",
         container_name: str | None = None,
+        pull_if_missing: bool = False,
     ) -> None:
         super().__init__(root, limits)
         self.image = image
+        self.pull_if_missing = pull_if_missing
         self.container_name = container_name or f"patchpilot-{root.name}"
         self._container_id: str | None = None
         self._daemon_detail = ""
@@ -112,6 +114,15 @@ class DockerSandbox(Sandbox):
                 f"Docker sandbox requested but the daemon is unavailable: {detail}. "
                 "Start Docker, or set PATCHPILOT_SANDBOX=local (weaker isolation)."
             )
+
+        if not await image_present(self.image) and self.pull_if_missing:
+            log.info("sandbox.docker.pulling", image=self.image)
+            code, out, err = await _run_host(["docker", "pull", self.image], timeout=3600)
+            if code != 0:
+                raise SandboxError(
+                    f"could not pull the sandbox image {self.image!r}: "
+                    f"{(err or out).strip()[-400:]}"
+                )
 
         if not await image_present(self.image):
             raise SandboxError(

@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     swebench_run_root: Path = BACKEND_ROOT / "data" / "swebench"
     swebench_max_workers: int = 4
     swebench_eval_timeout_s: int = 3600
+    swebench_instance_images: bool = True
+    """Run each benchmark task in the official per-instance SWE-bench image, so
+    the agent can actually run that repository's tests. Requires the docker
+    sandbox; each image is multiple GB and is pulled on first use."""
+    swebench_image_namespace: str = "swebench"
+    swebench_image_tag: str = "latest"
     swebench_python: str | None = None
     """Interpreter used to invoke the official harness. Defaults to sys.executable."""
 

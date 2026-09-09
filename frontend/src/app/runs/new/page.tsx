@@ -39,6 +39,7 @@ export default function NewRunPage() {
     provider: "",
     model: "",
     sandbox: "",
+    docker_image: "",
     max_iterations: "",
     max_runtime_s: "",
   });
@@ -84,6 +85,7 @@ export default function NewRunPage() {
       provider: form.provider || null,
       model: form.model || null,
       sandbox: form.sandbox || null,
+      docker_image: form.docker_image || null,
       max_iterations: form.max_iterations ? Number(form.max_iterations) : null,
       max_runtime_s: form.max_runtime_s ? Number(form.max_runtime_s) : null,
     };
@@ -329,6 +331,17 @@ export default function NewRunPage() {
                   <option value="local">local (process isolation)</option>
                   <option value="docker">docker (container isolation)</option>
                 </Select>
+              </Field>
+              <Field
+                label="Sandbox image"
+                hint="docker only — must contain git, a test runner and the repo's deps"
+              >
+                <Input
+                  value={form.docker_image}
+                  onChange={(e) => set("docker_image", e.target.value)}
+                  placeholder="patchpilot/runner:latest"
+                  className="mono"
+                />
               </Field>
               <Field label="Max iterations" hint={`default: ${status?.budgets.max_iterations ?? 30}`}>
                 <Input

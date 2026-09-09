@@ -83,6 +83,7 @@ export interface CreateRunInput {
   provider?: string | null;
   model?: string | null;
   sandbox?: string | null;
+  docker_image?: string | null;
   max_iterations?: number | null;
   max_tool_calls?: number | null;
   max_runtime_s?: number | null;

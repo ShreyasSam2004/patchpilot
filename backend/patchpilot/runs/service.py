@@ -38,6 +38,7 @@ async def create_run(
     provider: str | None = None,
     model: str | None = None,
     sandbox: str | None = None,
+    docker_image: str | None = None,
     max_iterations: int | None = None,
     max_tool_calls: int | None = None,
     max_runtime_s: int | None = None,
@@ -45,7 +46,9 @@ async def create_run(
 ) -> Run:
     """Queue a new run. The worker picks it up; this never blocks."""
     settings = settings or get_settings()
-    config = SessionConfig(provider=provider, model=model, sandbox=sandbox)
+    config = SessionConfig(
+        provider=provider, model=model, sandbox=sandbox, docker_image=docker_image
+    )
 
     budget_overrides = {
         key: value

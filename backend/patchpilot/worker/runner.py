@@ -119,10 +119,16 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
             log.warning("worker.run_missing", run_id=run_id)
             return
         task = _to_agent_task(run)
+        stored = run.config or {}
+        image = stored.get("docker_image")
         config = SessionConfig(
             provider=run.provider,
             model=run.model,
             sandbox=run.sandbox,
+            # Only honour a stored image that differs from the global default,
+            # so changing the default in .env still applies to old queued runs.
+            docker_image=image if image and image != settings.docker_image else None,
+            pull_image=bool(image) and image != settings.docker_image,
             allow_sandbox_fallback=True,
         )
 

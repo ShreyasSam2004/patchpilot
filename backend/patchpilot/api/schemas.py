@@ -29,6 +29,14 @@ class CreateRunRequest(BaseModel):
     provider: str | None = None
     model: str | None = None
     sandbox: Literal["local", "docker"] | None = None
+    docker_image: str | None = Field(
+        default=None,
+        description=(
+            "Sandbox image for this run. The docker sandbox has no network, so the "
+            "image must already contain git, a test runner, and the repository's "
+            "dependencies. Defaults to the configured image."
+        ),
+    )
     max_iterations: int | None = Field(default=None, ge=1, le=200)
     max_tool_calls: int | None = Field(default=None, ge=1, le=2000)
     max_runtime_s: int | None = Field(default=None, ge=30, le=21_600)

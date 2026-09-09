@@ -344,7 +344,8 @@ Or from the UI: **Benchmarks → New benchmark run**.
 The runner:
 
 1. loads instances from `princeton-nlp/SWE-bench_Lite` (HuggingFace),
-2. prepares each repository at its `base_commit`,
+2. prepares each repository at its `base_commit`, running the agent inside the
+   **official per-instance image** so it can actually run that repo's tests,
 3. hands the agent **only** the problem statement and the repository,
 4. captures `git diff` as `model_patch`,
 5. writes `predictions.jsonl` in the harness's exact schema,
@@ -566,6 +567,11 @@ See [`docs/SECURITY.md`](docs/SECURITY.md).
   image must be pre-provisioned with the repository's dependencies. The
   bundled `patchpilot/runner` image covers git plus a standard pytest stack;
   a project with extra dependencies needs a derived image.
+- **Arbitrary repositories need their own sandbox image.** The Docker sandbox
+  has no network, so a repo with third-party dependencies needs an image that
+  already has them — pass one as `docker_image` on the run. Benchmark tasks get
+  the official per-instance image automatically; the bundled
+  `patchpilot/runner` image only covers git plus a plain pytest stack.
 - **Python-first.** The tools work on any language, but symbol search,
   test-output parsing and the default test command are tuned for Python (with
   best-effort jest/unittest support), matching SWE-bench Lite.

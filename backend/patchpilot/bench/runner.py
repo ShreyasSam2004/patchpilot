@@ -37,6 +37,7 @@ from .evaluator import (
     run_official_evaluation,
     write_predictions,
 )
+from .images import instance_image_name
 
 log = get_logger(__name__)
 
@@ -251,10 +252,27 @@ async def _run_one_task(
     if config.get("max_iterations"):
         agent_task.budget_overrides["max_iterations"] = config["max_iterations"]
 
+    sandbox_kind = config.get("sandbox") or settings.sandbox
+    # In the docker sandbox, run inside the official per-instance image: it has
+    # the repository's dependencies installed, so `run_tests` observes what the
+    # evaluator will. A generic image cannot import numpy, scipy, Django, ...
+    use_instance_image = (
+        sandbox_kind == "docker" and settings.swebench_instance_images
+    )
     session_config = SessionConfig(
         provider=config.get("provider"),
         model=config.get("model"),
         sandbox=config.get("sandbox"),
+        docker_image=(
+            instance_image_name(
+                instance.instance_id,
+                namespace=settings.swebench_image_namespace,
+                tag=settings.swebench_image_tag,
+            )
+            if use_instance_image
+            else None
+        ),
+        pull_image=use_instance_image,
         allow_sandbox_fallback=True,
     )
 

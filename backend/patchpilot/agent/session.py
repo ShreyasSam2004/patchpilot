@@ -23,7 +23,8 @@ from ..logging_setup import get_logger
 from ..providers.base import ModelProvider
 from ..providers.factory import create_provider
 from ..sandbox.base import Sandbox
-from ..sandbox.factory import create_sandbox
+from ..sandbox.factory import create_sandbox, limits_from_settings
+from ..sandbox.local import LocalSandbox
 from ..tools.base import Tool
 from ..tools.native import build_native_tools
 from ..tools.policy import ToolPolicy
@@ -42,6 +43,11 @@ class SessionConfig:
     provider: str | None = None
     model: str | None = None
     sandbox: str | None = None
+    docker_image: str | None = None
+    """Override the sandbox image for this run. Benchmark runs point this at the
+    official per-instance SWE-bench image so the agent can actually run the
+    repository's tests."""
+    pull_image: bool = False
     allow_sandbox_fallback: bool = True
     keep_workspace: bool = False
     policy: ToolPolicy | None = None
@@ -54,6 +60,7 @@ class SessionConfig:
             "provider": self.provider or settings.provider,
             "model": self.model or settings.model,
             "sandbox": self.sandbox or settings.sandbox,
+            "docker_image": self.docker_image or settings.docker_image,
             "max_iterations": settings.max_iterations,
             "max_tool_calls": settings.max_tool_calls,
             "max_runtime_s": settings.max_runtime_s,
@@ -104,6 +111,7 @@ async def agent_session(
 
     workspace_root = settings.workspace_root / task.run_id
     sandbox: Sandbox | None = None
+    provisioner: Sandbox | None = None
     owns_provider = provider is None
     mcp_sessions: list[Any] = []
 
@@ -116,8 +124,15 @@ async def agent_session(
             kind=config.sandbox,
             allow_fallback=config.allow_sandbox_fallback,
             name=f"patchpilot-{task.run_id[:12]}",
+            image=config.docker_image,
+            pull_if_missing=config.pull_image,
         )
-        workspace = await _prepare(task, workspace_root, sandbox)
+        # Clone/fetch need network; the Docker sandbox runs with --network
+        # none. Provisioning is PatchPilot's own trusted operation, so it uses
+        # a host executor, while everything the agent does stays in `sandbox`.
+        provisioner = LocalSandbox(workspace_root, limits_from_settings(settings))
+        await provisioner.start()
+        workspace = await _prepare(task, workspace_root, sandbox, provisioner)
 
         registry, mcp_sessions = await build_registry(settings, config)
         if provider is None:
@@ -153,7 +168,9 @@ async def agent_session(
             remove_tree(workspace_root)
 
 
-async def _prepare(task: AgentTask, root: Path, sandbox: Sandbox) -> Workspace:
+async def _prepare(
+    task: AgentTask, root: Path, sandbox: Sandbox, provisioner: Sandbox | None = None
+) -> Workspace:
     if task.local_path is None and not task.repo_url:
         raise WorkspaceError("a run needs either a repository URL or a local path")
     return await prepare_workspace(
@@ -162,6 +179,7 @@ async def _prepare(task: AgentTask, root: Path, sandbox: Sandbox) -> Workspace:
         repo_url=task.repo_url,
         local_path=task.local_path,
         base_commit=task.base_commit,
+        provisioner=provisioner,
     )
 
 

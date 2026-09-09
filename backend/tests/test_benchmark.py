@@ -293,3 +293,46 @@ def test_suggested_test_command_names_files_not_test_ids() -> None:
     command = instance.suggested_test_command()
     assert "test_ascii_validator_with_newline" not in command
     assert "tests/auth_tests/test_validators.py" in command
+
+
+# ----------------------------------------------------- per-instance images
+
+
+def test_instance_image_matches_the_official_naming() -> None:
+    """Verified against swebench.image_builder.image_spec.ImageSpec.name.
+
+    Docker Hub rejects dunders, so the harness substitutes `_1776_`; getting
+    this wrong means every pull 404s.
+    """
+    from patchpilot.bench.images import instance_image_name
+
+    assert (
+        instance_image_name("astropy__astropy-12907", arch="x86_64")
+        == "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest"
+    )
+    assert (
+        instance_image_name("django__django-11099", arch="arm64")
+        == "swebench/sweb.eval.arm64.django_1776_django-11099:latest"
+    )
+
+
+def test_instance_image_is_lowercased_and_configurable() -> None:
+    from patchpilot.bench.images import instance_image_name
+
+    assert instance_image_name(
+        "Foo__Bar-1", namespace="myorg", tag="v2", arch="x86_64"
+    ) == "myorg/sweb.eval.x86_64.foo_1776_bar-1:v2"
+
+    # No namespace means a purely local image: no dunder substitution needed.
+    assert instance_image_name(
+        "foo__bar-1", namespace=None, arch="x86_64"
+    ) == "sweb.eval.x86_64.foo__bar-1:latest"
+
+
+def test_docker_arch_maps_apple_silicon() -> None:
+    from patchpilot.bench.images import docker_arch
+
+    assert docker_arch("arm64") == "arm64"
+    assert docker_arch("aarch64") == "arm64"
+    assert docker_arch("AMD64") == "x86_64"
+    assert docker_arch("x86_64") == "x86_64"

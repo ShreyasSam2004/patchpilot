@@ -136,6 +136,43 @@ resolve_rate = resolved / (resolved + unresolved) × 100
 `evaluated is False` or nothing has been graded. The UI renders "not evaluated"
 for `None`. An ungraded batch and a batch that scored zero are different claims.
 
+## Per-instance images
+
+A generic sandbox image cannot run a real repository's tests: astropy needs
+numpy, sympy needs mpmath, Django brings its own harness. The benchmark
+publishes one image per instance with the repository and its dependencies
+installed, and the evaluator runs in exactly those images.
+
+When the docker sandbox is selected, benchmark tasks therefore run in the
+official per-instance image, so the agent's `run_tests` observations mean the
+same thing the grader's will:
+
+```
+{namespace}/sweb.eval.{arch}.{instance_id}:{tag}
+swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
+```
+
+`__` becomes `_1776_` because Docker Hub rejects dunders, and the whole string
+is lowercased — taken from `swebench.image_builder.image_spec.ImageSpec.name`
+and pinned by `test_instance_image_matches_the_official_naming`.
+
+The image is pulled on first use, which is the one place the sandbox is allowed
+to reach the network — the pull happens on the host *before* the container is
+created with `--network none`. Each image is multiple GB; budget disk
+accordingly.
+
+Controlled by:
+
+```bash
+PATCHPILOT_SWEBENCH_INSTANCE_IMAGES=true     # default
+PATCHPILOT_SWEBENCH_IMAGE_NAMESPACE=swebench
+PATCHPILOT_SWEBENCH_IMAGE_TAG=latest
+```
+
+With the local sandbox, or with instance images disabled, the agent can still
+explore and patch but cannot run the repository's tests — it will finish
+without validation, which materially lowers the resolve rate.
+
 ## Requirements
 
 | Requirement | Why | Check |

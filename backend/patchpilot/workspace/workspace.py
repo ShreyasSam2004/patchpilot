@@ -185,7 +185,12 @@ class Workspace:
 
     # -------------------------------------------------------------------- git
     async def git(self, *args: str, timeout_s: int = 120) -> ExecResult:
-        return await self.sandbox.exec(["git", *args], cwd=None, timeout_s=timeout_s)
+        # `safe.directory` has to be supplied with -c: git deliberately ignores
+        # repository-local config for it. Without this, git refuses to operate
+        # on a bind-mounted workspace whose owner differs inside the container.
+        return await self.sandbox.exec(
+            ["git", "-c", "safe.directory=*", *args], cwd=None, timeout_s=timeout_s
+        )
 
     async def ensure_git_identity(self) -> None:
         """Some repos need an identity for `git stash`/`git apply --3way`."""
@@ -285,6 +290,21 @@ class Workspace:
         remove_tree(self.root)
 
 
+#: Git settings applied to the *provisioning* clone/fetch, which runs on the
+#: host. Fetching bytes is PatchPilot's own trusted operation, but the remote
+#: still gets to influence git's behaviour, so nothing that can execute is left
+#: enabled: no hooks, no filesystem monitor, no credential helpers, and none of
+#: the transports that shell out.
+_PROVISION_GIT_CONFIG: tuple[str, ...] = (
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+    "-c", "credential.helper=",
+    "-c", "protocol.ext.allow=never",
+    "-c", "protocol.file.allow=never",
+    "-c", "advice.detachedHead=false",
+)
+
+
 async def prepare_workspace(
     root: Path,
     sandbox: Sandbox,
@@ -292,10 +312,26 @@ async def prepare_workspace(
     repo_url: str | None = None,
     local_path: Path | None = None,
     base_commit: str | None = None,
+    provisioner: Sandbox | None = None,
 ) -> Workspace:
-    """Materialise a checkout at ``root`` from a URL or a local directory."""
+    """Materialise a checkout at ``root`` from a URL or a local directory.
+
+    Provisioning is split in two, because the two halves have different needs:
+
+    * **clone / fetch** run in ``provisioner`` — they need network access, and
+      the Docker sandbox is deliberately started with ``--network none``. This
+      is PatchPilot's own operation, not repository code, and it runs with
+      hooks, filters and credential helpers disabled.
+    * **populating the working tree** runs in ``sandbox`` — checking out repo
+      content can trigger ``.gitattributes`` smudge filters, so it belongs
+      inside whatever isolation the run was configured with.
+
+    ``provisioner`` defaults to ``sandbox``, which is correct for the local
+    sandbox (it already has network) and for tests.
+    """
     root.parent.mkdir(parents=True, exist_ok=True)
     workspace = Workspace(root, sandbox)
+    network = provisioner or sandbox
 
     if local_path is not None:
         source = local_path.resolve()
@@ -311,13 +347,17 @@ async def prepare_workspace(
         )
     elif repo_url:
         root.mkdir(parents=True, exist_ok=True)
-        clone_args = ["clone", "--quiet"]
+        # --no-checkout: fetch the objects here, but let the working tree be
+        # populated inside the run's sandbox further down.
+        clone_args = [*_PROVISION_GIT_CONFIG, "clone", "--quiet", "--no-checkout"]
         if base_commit is None:
             clone_args += ["--depth", "50"]
         clone_args += [repo_url, "."]
-        result = await sandbox.exec(["git", *clone_args], timeout_s=900)
+        result = await network.exec(["git", *clone_args], timeout_s=1800)
         if not result.ok:
-            raise WorkspaceError(f"git clone failed: {result.stderr.strip()[:500]}")
+            raise WorkspaceError(
+                f"git clone failed: {(result.stderr or result.stdout).strip()[:500]}"
+            )
     else:
         raise WorkspaceError("either repo_url or local_path is required")
 
@@ -329,14 +369,27 @@ async def prepare_workspace(
     else:
         await workspace.ensure_git_identity()
 
-    if base_commit:
-        fetch = await workspace.git("fetch", "--quiet", "origin", base_commit, timeout_s=900)
-        if not fetch.ok:
-            await workspace.git("fetch", "--quiet", "--unshallow", timeout_s=900)
-        checkout = await workspace.git("checkout", "--force", base_commit, timeout_s=300)
-        if not checkout.ok:
+    if repo_url:
+        if base_commit:
+            fetch = await network.exec(
+                ["git", *_PROVISION_GIT_CONFIG, "fetch", "--quiet", "origin", base_commit],
+                timeout_s=1800,
+            )
+            if not fetch.ok:
+                await network.exec(
+                    ["git", *_PROVISION_GIT_CONFIG, "fetch", "--quiet", "--unshallow"],
+                    timeout_s=1800,
+                )
+
+        # Populate the working tree inside the run's sandbox. `reset --hard`
+        # rather than `checkout` because the clone was made --no-checkout, so
+        # both the index and the tree still need filling.
+        target = base_commit or "HEAD"
+        populated = await workspace.git("reset", "--hard", "--quiet", target, timeout_s=600)
+        if not populated.ok:
             raise WorkspaceError(
-                f"could not check out base commit {base_commit}: {checkout.stderr.strip()[:400]}"
+                f"could not check out {target}: "
+                f"{(populated.stderr or populated.stdout).strip()[:400]}"
             )
 
     # Anything already dirty would pollute the final diff.
