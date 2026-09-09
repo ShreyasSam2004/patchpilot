@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -67,6 +68,20 @@ _SKIP_DIRS = frozenset(
 )
 
 
+#: `npm init` writes a `test` script that always fails. Trusting it makes the
+#: agent report "Error: no test specified" instead of running the suite the
+#: repository actually has -- a very common state for young projects.
+_NPM_PLACEHOLDER_TEST = re.compile(r"no test specified", re.IGNORECASE)
+
+#: JS test runners, in the order we prefer them when the npm script is unusable.
+_JS_RUNNERS: tuple[tuple[str, str], ...] = (
+    ("vitest", "npx vitest run"),
+    ("jest", "npx jest"),
+    ("mocha", "npx mocha"),
+    ("ava", "npx ava"),
+)
+
+
 def _test_command_for(directory: Path) -> str | None:
     """The test command a directory's layout implies, or None."""
     if (directory / "package.json").exists():
@@ -74,8 +89,20 @@ def _test_command_for(directory: Path) -> str | None:
             manifest = json.loads((directory / "package.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             manifest = {}
-        if isinstance(manifest.get("scripts"), dict) and "test" in manifest["scripts"]:
+        scripts = manifest.get("scripts") if isinstance(manifest.get("scripts"), dict) else {}
+        script = scripts.get("test", "")
+        if script and not _NPM_PLACEHOLDER_TEST.search(str(script)):
             return "npm test --silent"
+
+        # The script is missing or is the placeholder: infer the runner from
+        # the declared dependencies instead.
+        declared = {
+            *(manifest.get("devDependencies") or {}),
+            *(manifest.get("dependencies") or {}),
+        }
+        for package, command in _JS_RUNNERS:
+            if package in declared:
+                return command
         return "npx jest"
 
     for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py"):

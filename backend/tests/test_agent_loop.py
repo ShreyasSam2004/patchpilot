@@ -815,3 +815,36 @@ async def test_run_tests_cwd_cannot_escape_the_workspace(registry, tool_ctx) -> 
     )
     assert not result.ok
     assert result.error_code == "path_escape"
+
+
+def test_discovery_ignores_the_npm_placeholder_test_script(tmp_path) -> None:
+    """`npm init` writes a test script that always fails.
+
+    Trusting it makes the agent report "Error: no test specified" instead of
+    running the suite the repo actually has — which is exactly what a real
+    TypeScript run hit, on a repo that had jest in devDependencies all along.
+    """
+    import json as _json
+
+    from patchpilot.agent.orchestrator import _test_command_for
+
+    placeholder = 'echo "Error: no test specified" && exit 1'
+
+    (tmp_path / "stub_jest").mkdir()
+    (tmp_path / "stub_jest" / "package.json").write_text(
+        _json.dumps({"scripts": {"test": placeholder}, "devDependencies": {"jest": "^29"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "stub_vitest").mkdir()
+    (tmp_path / "stub_vitest" / "package.json").write_text(
+        _json.dumps({"scripts": {"test": placeholder}, "devDependencies": {"vitest": "^1"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "package.json").write_text(
+        _json.dumps({"scripts": {"test": "jest --ci"}}), encoding="utf-8"
+    )
+
+    assert _test_command_for(tmp_path / "stub_jest") == "npx jest"
+    assert _test_command_for(tmp_path / "stub_vitest") == "npx vitest run"
+    assert _test_command_for(tmp_path / "real") == "npm test --silent"
