@@ -32,11 +32,23 @@ backslash paths survive) and then validated.
 - **mutating git subcommands** — `push`, `remote`, `config`, `clone`,
   `submodule`, `fetch`, `pull`, `credential`
 - **recursive workspace deletes** — `rm -rf .`, `rm -rf *`
-- **shell metacharacters in arguments** — `;` `&` `|` `` ` `` `$` `<` `>` `&&`
-  `$(`. Since no shell runs, their presence means the model is trying to smuggle
-  a second command.
-- **credential and escape paths** — filesystem roots, `~`, `$HOME`, `.ssh`,
-  `.aws`, `.env`, `.git-credentials`
+- **shells** — `sh`, `bash`, `zsh`, `dash`, `powershell`, `cmd`, … Blocking
+  these is what makes the rest of the guard sound: metacharacters in arguments
+  are inert precisely because no shell ever interprets them.
+- **standalone shell operators** — an argument that is exactly `;`, `&&`, `|`,
+  `>` … means the model tried to chain commands and shlex split it into an
+  inert token that would only confuse the target program. Refused with a note
+  to issue separate calls.
+- **credential paths, for every command** — `.ssh`, `.aws`, `.env`,
+  `.git-credentials`, `.netrc`
+- **root and home paths, for destructive commands only** — `rm -rf /` is
+  refused; `ls /` is not.
+
+A metacharacter *inside* a larger argument is deliberately allowed.
+`python -c "import numpy; print(x)"` is Python syntax, not shell syntax, and is
+completely inert without a shell. An earlier version refused it and cost a real
+run about a third of its tool budget on safe, useful commands — a guard that
+blocks legitimate work for no security gain is a bug, not caution.
 
 The guard applies to model-supplied commands (`run_tests`, `run_command`).
 PatchPilot's own git plumbing calls the sandbox directly, which is why the

@@ -84,14 +84,24 @@ class LoopDetector:
     """Signal kinds already reported, so we escalate instead of repeating."""
 
     # ------------------------------------------------------------- recording
-    def record_action(self, tool: str, arguments: dict[str, Any], *, mutating: bool) -> None:
+    def record_action(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        mutating: bool,
+        succeeded: bool = True,
+    ) -> None:
         key = canonical_action(tool, arguments)
         self.actions[key] += 1
         self.action_labels[key] = _label(tool, arguments)
-        if mutating:
+        if mutating and succeeded:
             self.tests_since_mutation = 0
             self.iterations_since_mutation = 0
-        elif tool in {"run_tests", "run_command"}:
+        elif tool == "run_tests" and succeeded:
+            # Only a test run that actually executed counts as churn. A refused
+            # or crashed call did not observe anything, so telling the agent it
+            # "ran tests 3 times" would be false and unactionable.
             self.tests_since_mutation += 1
 
     def record_patch(self, diff: str, *, applied: bool) -> str:

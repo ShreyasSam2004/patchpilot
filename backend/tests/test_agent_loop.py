@@ -643,3 +643,41 @@ async def test_agent_can_run_every_fixture_without_crashing(
     assert result.state is RunState.FAILED  # finished honestly, did not resolve
     assert result.metrics.test_runs == 1
     assert result.test_runs[0].failed > 0, "the fixture bug should make tests fail"
+
+
+async def test_refused_commands_do_not_count_as_test_runs(settings, tmp_path) -> None:
+    """A refused call observed nothing, so calling it a test run is a lie.
+
+    The detector used to count every run_command — including ones the guard
+    rejected — as test churn, then told the agent "you have run tests 3 times
+    without changing any code" when it had run none.
+    """
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 6
+    directives: list[str] = []
+
+    def responder(messages, index):
+        for message in messages:
+            if message.role == "user" and "run tests" in message.content:
+                directives.append(message.content)
+        # Always refused by the guard: a bare shell operator.
+        return ScriptedTurn(
+            text="probing", tool_calls=[("run_command", {"command": ["python", "&&"]})]
+        )
+
+    await run_agent_task(
+        make_task("calculator_bug", "run-refused-1"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=ScriptedProvider(responder=responder),
+    )
+    assert not directives, f"refused calls were counted as test runs: {directives[:1]}"
+
+
+async def test_find_symbol_tolerates_a_def_prefix(registry, tool_ctx) -> None:
+    """Models pass 'def divide' as often as 'divide'."""
+    plain = await registry.call("find_symbol", tool_ctx, {"symbol": "divide"})
+    prefixed = await registry.call("find_symbol", tool_ctx, {"symbol": "def divide"})
+    assert plain.ok and prefixed.ok
+    assert prefixed.data["definition_count"] == plain.data["definition_count"] >= 1
+    assert prefixed.data["symbol"] == "divide"

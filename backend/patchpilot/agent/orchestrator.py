@@ -313,7 +313,9 @@ class AgentOrchestrator:
 
             tool_result = await self.registry.call(call.name, ctx, call.arguments)
             is_mutating = self._is_mutating(call.name)
-            self.detector.record_action(call.name, call.arguments, mutating=is_mutating)
+            self.detector.record_action(
+                call.name, call.arguments, mutating=is_mutating, succeeded=tool_result.ok
+            )
 
             if is_mutating and tool_result.ok:
                 mutated = True

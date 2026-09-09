@@ -15,6 +15,10 @@ from dataclasses import dataclass
 #: Executables that are never allowed, regardless of arguments.
 BLOCKED_EXECUTABLES: frozenset[str] = frozenset(
     {
+        # Shells. Blocking these is what makes the rest of this module sound:
+        # PatchPilot never invokes a shell, so metacharacters in arguments are
+        # inert -- unless the model launches a shell itself.
+        "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
         "sudo",
         "su",
         "doas",
@@ -75,20 +79,43 @@ NETWORK_EXECUTABLES: frozenset[str] = frozenset(
     {"curl", "wget", "httpie", "http", "rsync", "svn", "hg"}
 )
 
-#: Argument patterns that indicate an escape or a destructive wipe.
-DANGEROUS_ARG_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"^(/|[A-Za-z]:[\\/])$"), "targets a filesystem root"),
-    (re.compile(r"^~($|[\\/])"), "targets the host home directory"),
-    (re.compile(r"^\$\{?HOME"), "targets the host home directory"),
+#: Commands that act destructively on whatever path they are given. Only for
+#: these does a bare `/` or `~` argument mean something dangerous.
+DESTRUCTIVE_EXECUTABLES: frozenset[str] = frozenset(
+    {"rm", "rmdir", "del", "erase", "mv", "move", "cp", "copy", "chmod", "chown",
+     "dd", "shred", "truncate", "mkfs", "rsync"}
+)
+
+#: Paths that are sensitive to *read*, not just to write. Narrow on purpose:
+#: these are credential stores, and there is no legitimate reason for a
+#: bug-fixing agent to touch them.
+CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(^|[\\/])\.ssh([\\/]|$)"), "touches SSH credentials"),
     (re.compile(r"(^|[\\/])\.aws([\\/]|$)"), "touches cloud credentials"),
     (re.compile(r"(^|[\\/])\.env($|[\\/.])"), "touches an environment secrets file"),
     (re.compile(r"(^|[\\/])\.git-credentials$"), "touches git credentials"),
+    (re.compile(r"(^|[\\/])\.netrc$"), "touches network credentials"),
 )
 
-#: Shell metacharacters. We never run a shell, so their presence in an argument
-#: means the model is trying to smuggle a second command.
-SHELL_METACHARACTERS = re.compile(r"[;&|`$<>]|\|\||&&|\$\(")
+#: Paths that only matter as the *target* of a destructive command.
+DESTRUCTIVE_TARGETS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(/|[A-Za-z]:[\\/])$"), "targets a filesystem root"),
+    (re.compile(r"^~($|[\\/])"), "targets the host home directory"),
+    (re.compile(r"^\$\{?HOME"), "targets the host home directory"),
+)
+
+#: Tokens that only make sense to a shell. We never run one, so shlex has split
+#: them into inert arguments that will merely confuse the target program —
+#: refusing with an explanation is more useful than letting `pytest` receive a
+#: literal `&&`.
+#:
+#: NB: this deliberately matches a *whole argument*, not a substring. A
+#: semicolon inside `python -c "import numpy; print(x)"` is Python syntax and is
+#: completely inert without a shell; an earlier version rejected it and wasted
+#: a third of the agent's budget on refused, entirely safe commands.
+SHELL_OPERATOR_TOKENS: frozenset[str] = frozenset(
+    {";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "2>", "2>&1"}
+)
 
 
 @dataclass(slots=True)
@@ -134,14 +161,21 @@ def check_command(argv: list[str], *, allow_network: bool = False) -> GuardVerdi
         if recursive and any(t in {".", "..", "*"} for t in targets):
             return GuardVerdict(False, "recursive delete of the whole workspace is refused")
 
+    destructive = executable in DESTRUCTIVE_EXECUTABLES
+
     for arg in argv[1:]:
-        if SHELL_METACHARACTERS.search(arg):
+        if arg in SHELL_OPERATOR_TOKENS:
             return GuardVerdict(
                 False,
-                f"argument {arg!r} contains shell metacharacters; commands run without a shell",
+                f"{arg!r} is a shell operator, but commands run without a shell. "
+                "Issue each command as a separate call.",
             )
-        for pattern, reason in DANGEROUS_ARG_PATTERNS:
+        for pattern, reason in CREDENTIAL_PATTERNS:
             if pattern.search(arg):
                 return GuardVerdict(False, f"argument {arg!r} {reason}")
+        if destructive:
+            for pattern, reason in DESTRUCTIVE_TARGETS:
+                if pattern.search(arg):
+                    return GuardVerdict(False, f"argument {arg!r} {reason}")
 
     return GuardVerdict(True)

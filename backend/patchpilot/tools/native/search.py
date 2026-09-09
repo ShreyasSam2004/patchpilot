@@ -172,19 +172,23 @@ class FindSymbolTool(Tool[FindSymbolArgs]):
     timeout_s = 60.0
 
     async def execute(self, ctx: ToolContext, args: FindSymbolArgs) -> ToolResult:
-        escaped = re.escape(args.symbol)
+        # Models routinely pass "def foo" or "class Bar" here. Taking the bare
+        # identifier is friendlier than returning nothing.
+        symbol = re.sub(r"^\s*(?:async\s+)?(?:def|class|function|fn)\s+", "", args.symbol).strip()
+        symbol = symbol.split("(")[0].strip() or args.symbol
+        escaped = re.escape(symbol)
         pattern = re.compile(
             "|".join(f"(?:{p.format(s=escaped)})" for p in DEFINITION_PATTERNS),
             re.MULTILINE,
         )
         matches, scanned, truncated = _scan(ctx.workspace, pattern, args.path, None, args.limit)
         if not matches:
-            fallback = _compile(args.symbol, regex=False, case_sensitive=True)
+            fallback = _compile(symbol, regex=False, case_sensitive=True)
             references, scanned, _ = _scan(ctx.workspace, fallback, args.path, None, 20)
             if references:
                 body = _render(references)
                 return ToolResult.success(
-                    f"No definition of {args.symbol!r} found, but it is referenced in "
+                    f"No definition of {symbol!r} found, but it is referenced in "
                     f"{len({r.path for r in references})} files:\n\n{body}",
                     summary=(
                         f"find_symbol '{args.symbol}' — no definition, "
@@ -195,17 +199,17 @@ class FindSymbolTool(Tool[FindSymbolArgs]):
                     files=sorted({r.path for r in references}),
                 )
             return ToolResult.success(
-                f"{args.symbol!r} does not appear in {args.path} ({scanned} files scanned).",
-                summary=f"find_symbol '{args.symbol}' — not found",
-                symbol=args.symbol,
+                f"{symbol!r} does not appear in {args.path} ({scanned} files scanned).",
+                summary=f"find_symbol '{symbol}' — not found",
+                symbol=symbol,
                 definition_count=0,
                 files=[],
             )
         files = sorted({m.path for m in matches})
         return ToolResult(
             ok=True,
-            content=f"Definitions of {args.symbol!r}:\n\n{_render(matches)}",
-            summary=f"find_symbol '{args.symbol}' — {len(matches)} definitions",
+            content=f"Definitions of {symbol!r}:\n\n{_render(matches)}",
+            summary=f"find_symbol '{symbol}' — {len(matches)} definitions",
             truncated=truncated,
-            data={"symbol": args.symbol, "definition_count": len(matches), "files": files},
+            data={"symbol": symbol, "definition_count": len(matches), "files": files},
         )
