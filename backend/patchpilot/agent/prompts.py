@@ -59,10 +59,21 @@ debug prints.
 - Do not weaken, skip or delete tests to make them pass. That is never a fix.
 - Prefer `apply_patch` with a minimal diff; use `edit_file` when an exact \
 string replacement is clearer.
+- Scratch files belong in `.patchpilot/`, which is excluded from your patch. \
+Write reproduction scripts there (`.patchpilot/repro.py`) and run them from \
+there. A script written anywhere else lands in your submitted diff, and a diff \
+whose only content is a debug script counts as no fix at all. Writing one is \
+also not progress: the deliverable is a change to the project's own source.
 
 **E. VALIDATE** — Run the specific test that covers the bug first, then broaden \
 to the surrounding suite to catch regressions. A fix you have not run is not a \
 fix.
+
+The tests that will judge your work do not all exist in this checkout — some \
+are added afterwards from the issue's own expected behaviour. So a green suite \
+is necessary but not sufficient: also demonstrate, with a reproduction, that \
+the exact behaviour described in the issue now happens. Say what you observed \
+in your `finish` summary.
 
 **F. OBSERVE** — When tests fail, classify the failure before acting:
 - ORIGINAL_BUG — your change did not address the real cause;

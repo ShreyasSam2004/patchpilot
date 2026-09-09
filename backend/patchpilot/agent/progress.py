@@ -23,11 +23,32 @@ iteration is worse than the problem it solves.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 #: Tools that constitute an edit to the repository.
 EDIT_TOOLS: frozenset[str] = frozenset({"apply_patch", "edit_file", "write_file"})
+
+#: Paths that are scratch space, not a fix. Writing a reproduction script is
+#: useful work, but it is not progress toward a patch -- and counting it as one
+#: silenced the anti-paralysis nudge for a run whose entire final "patch" turned
+#: out to be a debug script.
+SCRATCH_PREFIXES: tuple[str, ...] = (".patchpilot/", ".patchpilot")
+SCRATCH_FILE = re.compile(
+    r"^(repro|reproduce|debug|scratch|tmp|temp|snippet|example|check)[\w.-]*\.py$",
+    re.IGNORECASE,
+)
+
+
+def is_scratch(path: str) -> bool:
+    """True when a written path is scratch space rather than a candidate fix."""
+    normalised = path.replace(chr(92), "/")
+    while normalised.startswith("./"):
+        normalised = normalised[2:]  # a prefix strip; lstrip("./") eats the dot
+    if normalised.startswith(SCRATCH_PREFIXES):
+        return True
+    return "/" not in normalised and bool(SCRATCH_FILE.match(normalised))
 
 #: Tools that gather evidence without changing anything.
 READ_TOOLS: frozenset[str] = frozenset(
@@ -88,6 +109,9 @@ class ProgressTracker:
         if not succeeded:
             return
         if tool in EDIT_TOOLS:
+            path = arguments.get("path") or arguments.get("file_path")
+            if isinstance(path, str) and is_scratch(path):
+                return  # a reproduction script is not a step toward the fix
             self.edits += 1
             self.iterations_since_edit = 0
             if self.first_edit is None:

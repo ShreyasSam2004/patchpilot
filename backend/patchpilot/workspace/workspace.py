@@ -68,6 +68,13 @@ class DiffStat:
     files: list[str] = field(default_factory=list)
 
 
+#: Names that read as a throwaway reproduction script rather than a fix.
+_SCRATCH_FILE = re.compile(
+    r"^(repro|reproduce|debug|scratch|tmp|temp|snippet|example|check)[\w.-]*\.py$",
+    re.IGNORECASE,
+)
+
+
 class Workspace:
     """A jailed checkout plus the git operations the agent needs."""
 
@@ -221,6 +228,40 @@ class Workspace:
             ":(exclude)*.pyc",
             ":(exclude)__pycache__",
         )
+        await self._drop_scratch_additions()
+
+    async def _drop_scratch_additions(self) -> list[str]:
+        """Unstage reproduction scripts the agent dropped in the repository root.
+
+        Agents write a script to reproduce the bug, and when they cannot write
+        outside the workspace they write it inside one. Both observed cases hurt:
+        one instance shipped `repro_test2.py` alongside a real fix, and another
+        submitted `repro_debug.py` as its *entire* patch -- graded, of course, as
+        unresolved.
+
+        Narrow on purpose. Only newly *added* files, only in the repository root,
+        only scratch-shaped names. A new module inside a package is left alone,
+        because that can be a genuine fix, and modifications to a tracked file of
+        any name are never touched.
+        """
+        listing = await self.git("diff", "--cached", "--name-status")
+        if not listing.ok:
+            return []
+        dropped: list[str] = []
+        for line in listing.stdout.splitlines():
+            parts = line.split(chr(9))
+            if len(parts) < 2 or parts[0].strip() != "A":
+                continue
+            path = parts[1].strip()
+            if "/" in path or chr(92) in path:
+                continue
+            if _SCRATCH_FILE.match(path):
+                dropped.append(path)
+        for path in dropped:
+            await self.git("reset", "--quiet", "HEAD", "--", path)
+        if dropped:
+            log.info("workspace.scratch_excluded_from_patch", files=dropped)
+        return dropped
 
     async def diff(self) -> str:
         """The full working-tree diff, including new files.

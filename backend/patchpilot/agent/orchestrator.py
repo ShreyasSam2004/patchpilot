@@ -87,8 +87,26 @@ _JS_RUNNERS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _test_command_for(directory: Path) -> str | None:
-    """The test command a directory's layout implies, or None."""
+#: Test runners a project ships itself, tried when pytest is unavailable.
+#: These are conventions, not project-specific rules: sympy drives its suite
+#: with `bin/test`, Django with `tests/runtests.py`, and many older projects
+#: with a top-level `runtests.py`.
+_NATIVE_RUNNERS: tuple[tuple[str, str], ...] = (
+    ("bin/test", "python bin/test"),
+    ("tests/runtests.py", "python tests/runtests.py"),
+    ("runtests.py", "python runtests.py"),
+)
+
+
+def _test_command_for(directory: Path, *, has_pytest: bool = True) -> str | None:
+    """The test command a directory's layout implies, or None.
+
+    ``has_pytest`` comes from the environment probe. Without it this returned
+    `python -m pytest -q` for any tree containing a `conftest.py` -- which is
+    true of sympy, whose interpreter has no pytest at all. Every task in the
+    first benchmark batch was handed that command, and it exits 1 with no
+    output, which the agent reasonably read as a broken repository.
+    """
     if (directory / "package.json").exists():
         try:
             manifest = json.loads((directory / "package.json").read_text(encoding="utf-8"))
@@ -109,6 +127,17 @@ def _test_command_for(directory: Path) -> str | None:
             if package in declared:
                 return command
         return "npx jest"
+
+    if not has_pytest:
+        # Never suggest a runner the interpreter cannot load.
+        for marker, command in _NATIVE_RUNNERS:
+            if (directory / marker).exists():
+                return command
+        for tests in ("tests", "test"):
+            candidate = directory / tests
+            if candidate.is_dir() and any(candidate.glob("test_*.py")):
+                return "python -m unittest discover"
+        return None
 
     for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py"):
         if (directory / marker).exists():
@@ -223,6 +252,13 @@ class AgentOrchestrator:
             isolation=self.sandbox.info().isolation,
         )
 
+        # Somewhere to put reproduction scripts. `_stage_all` already excludes
+        # `.patchpilot*` from the diff, but with nowhere obvious to write, one
+        # run put its repro script in the repository root and submitted it as
+        # the entire patch.
+        with contextlib.suppress(OSError):
+            (self.workspace.root / ".patchpilot").mkdir(exist_ok=True)
+
         # Probe the interpreter before anything else. 39% of the tool calls in
         # the first SWE-bench batch were spent rediscovering it per task; doing
         # it once here, off-budget, is the single largest saving available.
@@ -288,14 +324,17 @@ class AgentOrchestrator:
                 if d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _SKIP_DIRS
             )
 
+        has_pytest = self.environment.has_pytest or not self.environment.probed
         for directory in candidates:
-            command = _test_command_for(directory)
+            command = _test_command_for(directory, has_pytest=has_pytest)
             if command is None:
                 continue
             relative = None if directory == root else self.workspace.relpath(directory)
             return command, relative
 
-        return "python -m pytest -q", None
+        # Last resort. When the probe told us there is no pytest, saying so is
+        # more useful than naming a command that cannot run.
+        return ("python -m pytest -q" if has_pytest else "python -m unittest discover"), None
 
     # ------------------------------------------------------------- main loop
     async def _loop(self) -> None:

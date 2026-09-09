@@ -372,3 +372,101 @@ def test_the_extension_does_not_touch_the_cost_or_time_ceilings() -> None:
     assert tracker.budget.max_runtime_s == 900
     tracker.record_cost(2.5)
     assert tracker.exceeded() == "max_cost_usd", "cost still stops the run"
+
+
+# ------------------------------------------------- test-runner discovery
+
+
+def test_pytest_is_not_suggested_when_the_interpreter_lacks_it(tmp_path: Path) -> None:
+    """Verified against a real SWE-bench image: sympy's testbed env has no pytest.
+
+    The tree has a `conftest.py`, so the old heuristic returned
+    `python -m pytest -q` -- which exits 1 with no output at all. Every task in
+    the first batch was handed exactly that.
+    """
+    from patchpilot.agent.orchestrator import _test_command_for
+
+    (tmp_path / "conftest.py").write_text("")
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "test").write_text("#!/usr/bin/env python\n")
+
+    assert _test_command_for(tmp_path, has_pytest=True) == "python -m pytest -q"
+    assert _test_command_for(tmp_path, has_pytest=False) == "python bin/test"
+
+
+def test_django_style_runners_are_recognised(tmp_path: Path) -> None:
+    from patchpilot.agent.orchestrator import _test_command_for
+
+    (tmp_path / "conftest.py").write_text("")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "runtests.py").write_text("")
+    assert _test_command_for(tmp_path, has_pytest=False) == "python tests/runtests.py"
+
+
+def test_unittest_is_the_fallback_without_pytest(tmp_path: Path) -> None:
+    from patchpilot.agent.orchestrator import _test_command_for
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("")
+    assert _test_command_for(tmp_path, has_pytest=False) == "python -m unittest discover"
+    assert _test_command_for(tmp_path, has_pytest=True) == "python -m pytest -q"
+
+
+# ------------------------------------------------------- scratch files
+
+
+@pytest.mark.parametrize(
+    ("path", "scratch"),
+    [
+        (".patchpilot/repro.py", True),
+        ("./.patchpilot/notes.py", True),
+        ("repro_debug.py", True),      # this one *was* an entire submitted patch
+        ("repro_test2.py", True),      # this one shipped alongside a real fix
+        ("check.py", True),
+        ("sympy/core/mod.py", False),
+        ("tests/test_numbers.py", False),
+        ("sympy/repro_helper.py", False),  # inside a package: could be a real fix
+    ],
+)
+def test_scratch_paths_are_recognised(path: str, scratch: bool) -> None:
+    from patchpilot.agent.progress import is_scratch
+
+    assert is_scratch(path) is scratch
+
+
+def test_writing_a_repro_script_is_not_progress_toward_a_patch() -> None:
+    """Observed: a run wrote `repro_debug.py` at iteration 19, which silenced the
+    anti-paralysis nudge and became the whole patch. It had changed no source."""
+    tracker = ProgressTracker()
+    tracker.record_tool("write_file", {"path": "repro_debug.py"}, 19, succeeded=True)
+    assert not tracker.has_edit
+    assert tracker.pressure(20, 22) is Pressure.URGENT, "the nudge must keep firing"
+
+    tracker.record_tool("edit_file", {"path": "sympy/core/numbers.py"}, 20, succeeded=True)
+    assert tracker.has_edit
+    assert tracker.snapshot()["time_to_first_edit"] == 20
+
+
+async def test_a_repro_script_in_the_repo_root_is_kept_out_of_the_patch(
+    workspace,
+) -> None:
+    """The safety net for when the agent ignores `.patchpilot/` anyway."""
+    (workspace.root / "repro_debug.py").write_text("print('debug')\n", encoding="utf-8")
+    (workspace.root / "src").mkdir(exist_ok=True)
+    real = workspace.root / "src" / "calculator.py"
+    real.write_text((real.read_text(encoding="utf-8") if real.exists() else "") + "# fix\n",
+                    encoding="utf-8")
+
+    diff = await workspace.diff()
+    assert "repro_debug.py" not in diff, "a debug script must never reach the patch"
+    assert "src/calculator.py" in diff, "the real change must survive"
+
+
+async def test_a_new_module_inside_a_package_still_reaches_the_patch(workspace) -> None:
+    """The exclusion is narrow: adding a real source file can be a genuine fix."""
+    pkg = workspace.root / "src"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "repro_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    diff = await workspace.diff()
+    assert "src/repro_helper.py" in diff
