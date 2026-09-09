@@ -188,6 +188,45 @@ patches are still generated and stored, the batch is marked `NOT EVALUATED`
 with the reason, and `patchpilot bench evaluate <id>` can grade it later once
 the environment is fixed.
 
+## Running the harness from Windows
+
+The harness is invoked through `patchpilot/bench/harness_shim.py` rather than
+with `python -m swebench.harness.run_evaluation`. The shim forces
+`pathlib.Path.write_text` to emit LF and then hands over to the harness's own
+`__main__`; grading logic is untouched.
+
+Without it, `run_evaluation.py` writes the container's `eval.sh` (and the model
+patch) with `Path.write_text`, which on Windows translates every `\n` to
+`\r\n`. Both files are copied byte-for-byte into a Linux container, where bash
+reads the trailing CR as part of each command:
+
+```
++ python -m pip install -e $'.\r'
+ERROR: . is not a valid editable requirement.
++ git checkout <sha> $'sympy/core/tests/test_numbers.py\r'
+error: pathspec 'sympy/core/tests/test_numbers.py?' did not match any file(s)
++ bin/test -C --verbose $'sympy/core/tests/test_numbers.py\r'
+ImportError: SymPy now depends on mpmath as an external library.
+```
+
+Dependencies are never installed and the gold test files are never restored, so
+every instance dies at import and is graded UNRESOLVED whatever its patch did.
+
+**This failure is silent.** The harness reports a complete run with a full
+report per instance. The only symptom is a 0% resolve rate with zero
+`PASS_TO_PASS` successes anywhere -- and "our agent scored 0%" is a plausible
+enough result that it is easy to accept. One batch here was graded 0/9 for this
+reason; re-graded through the shim, the same patches scored 4/15. If you ever
+see a whole batch with no `PASS_TO_PASS` success at all, read a
+`test_output.txt` before believing the number.
+
+## Re-grading an existing batch
+
+`patchpilot bench evaluate <id>` mints a **new** harness `run_id` and persists
+it. The harness treats an instance that already has a `report.json` under its
+run_id as done and skips it, so reusing the key returns the previous verdicts in
+seconds without starting a container -- indistinguishable from a real re-grade.
+
 ## Reproducibility
 
 Each `BenchmarkRun` persists everything needed to repeat it:

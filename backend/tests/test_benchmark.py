@@ -171,7 +171,9 @@ def test_missing_report_yields_no_verdicts(tmp_path: Path) -> None:
 def test_slashes_in_model_names_are_handled(tmp_path: Path) -> None:
     model = "org/model-1"
     path = tmp_path / f"{model.replace('/', '__')}.{RUN_KEY}.json"
-    path.write_text(json.dumps({"resolved_ids": ["a__a-1"], "unresolved_ids": []}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"resolved_ids": ["a__a-1"], "unresolved_ids": []}), encoding="utf-8"
+    )
     outcome = parse_evaluation_report(tmp_path, RUN_KEY, model)
     assert outcome.resolved_ids == {"a__a-1"}
 
@@ -241,10 +243,12 @@ def test_local_dataset_file(tmp_path: Path) -> None:
     assert [i.instance_id for i in instances] == ["a__a-1", "b__b-2"]
 
     assert [i.instance_id for i in load_instances(str(path), "test", limit=1)] == ["a__a-1"]
-    assert [i.instance_id for i in load_instances(str(path), "test", limit=1, offset=1)] == ["b__b-2"]
-    assert [
-        i.instance_id for i in load_instances(str(path), "test", instance_ids=["b__b-2"])
-    ] == ["b__b-2"]
+    assert [i.instance_id for i in load_instances(str(path), "test", limit=1, offset=1)] == [
+        "b__b-2"
+    ]
+    assert [i.instance_id for i in load_instances(str(path), "test", instance_ids=["b__b-2"])] == [
+        "b__b-2"
+    ]
 
 
 def test_unknown_instance_id_is_reported(tmp_path: Path) -> None:
@@ -252,8 +256,9 @@ def test_unknown_instance_id_is_reported(tmp_path: Path) -> None:
 
     path = tmp_path / "mini.json"
     path.write_text(
-        json.dumps([{"instance_id": "a__a-1", "repo": "o/a", "base_commit": "x",
-                     "problem_statement": "p"}]),
+        json.dumps(
+            [{"instance_id": "a__a-1", "repo": "o/a", "base_commit": "x", "problem_statement": "p"}]
+        ),
         encoding="utf-8",
     )
     with pytest.raises(BenchmarkError, match="not found"):
@@ -319,14 +324,16 @@ def test_instance_image_matches_the_official_naming() -> None:
 def test_instance_image_is_lowercased_and_configurable() -> None:
     from patchpilot.bench.images import instance_image_name
 
-    assert instance_image_name(
-        "Foo__Bar-1", namespace="myorg", tag="v2", arch="x86_64"
-    ) == "myorg/sweb.eval.x86_64.foo_1776_bar-1:v2"
+    assert (
+        instance_image_name("Foo__Bar-1", namespace="myorg", tag="v2", arch="x86_64")
+        == "myorg/sweb.eval.x86_64.foo_1776_bar-1:v2"
+    )
 
     # No namespace means a purely local image: no dunder substitution needed.
-    assert instance_image_name(
-        "foo__bar-1", namespace=None, arch="x86_64"
-    ) == "sweb.eval.x86_64.foo__bar-1:latest"
+    assert (
+        instance_image_name("foo__bar-1", namespace=None, arch="x86_64")
+        == "sweb.eval.x86_64.foo__bar-1:latest"
+    )
 
 
 def test_docker_arch_maps_apple_silicon() -> None:
@@ -347,11 +354,16 @@ def test_disk_requirement_scales_with_batch_size() -> None:
     """
     from patchpilot.bench.evaluator import required_disk_gb
 
-    assert required_disk_gb(1) == 10.0
+    assert required_disk_gb(1) == 6.0  # floor: working space for one image
     assert required_disk_gb(15) == 14.0
     assert required_disk_gb(300) == 185.0
     # Unknown batch size stays conservative.
     assert required_disk_gb(None) == 50.0
+    # Images generation already pulled are not charged again: evaluation reuses
+    # them, so a re-grade of an existing batch only needs working space.
+    assert required_disk_gb(15, missing_images=0) == 6.0
+    assert required_disk_gb(15, missing_images=15) == 14.0
+    assert required_disk_gb(15, missing_images=5) < required_disk_gb(15, missing_images=15)
     # Monotonic: a bigger batch never needs less.
     sizes = [1, 5, 15, 50, 100, 300]
     reqs = [required_disk_gb(n) for n in sizes]
@@ -378,3 +390,99 @@ async def test_preflight_passes_for_a_small_batch_on_a_modest_disk(settings) -> 
         full = await evaluator_preflight(settings, instance_count=300)
         assert full["ready"] is False
         assert "185 GB" in full["problems"][0]
+
+
+# --- harness line endings ----------------------------------------------------
+# The harness copies the eval script it writes straight into a Linux container.
+# On Windows `Path.write_text` translates every \n to \r\n, bash then reads the
+# \r as part of each command, dependencies are never installed, gold tests are
+# never restored, and every instance grades UNRESOLVED with no test having run.
+# The harness still reports a *complete* run, so the only symptom is a silent
+# 0%. These tests pin the shim that prevents it.
+
+
+def test_the_shim_writes_shell_scripts_with_lf(tmp_path: Path) -> None:
+    from patchpilot.bench.harness_shim import force_lf_write_text
+
+    force_lf_write_text()
+    script = tmp_path / "eval.sh"
+    script.write_text("#!/bin/bash\ngit checkout abc123 tests/test_x.py\n")
+
+    raw = script.read_bytes()
+    assert b"\r\n" not in raw, "a CR here becomes part of the command inside bash"
+    assert raw.endswith(b"tests/test_x.py\n")
+
+
+def test_the_shim_is_idempotent_and_honours_an_explicit_newline(tmp_path: Path) -> None:
+    from patchpilot.bench.harness_shim import force_lf_write_text
+
+    force_lf_write_text()
+    force_lf_write_text()  # double application must not nest wrappers
+
+    target = tmp_path / "explicit.txt"
+    target.write_text("a\r\nb\r\n", newline="")
+    assert target.read_bytes() == b"a\r\nb\r\n"
+
+    with pytest.raises(TypeError):
+        target.write_text(b"bytes")  # type: ignore[arg-type]
+
+
+def test_the_evaluator_launches_the_harness_through_the_shim() -> None:
+    from patchpilot.bench.evaluator import HARNESS_SHIM
+
+    assert HARNESS_SHIM.is_file()
+    source = (Path(__file__).parent.parent / "patchpilot" / "bench" / "evaluator.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"-m",\n        HARNESS_MODULE,' not in source, (
+        "invoking the harness directly reintroduces the CRLF eval.sh bug"
+    )
+    assert "str(HARNESS_SHIM)," in source
+
+
+def test_the_shim_does_not_import_the_application() -> None:
+    # It runs under settings.swebench_python, which may lack patchpilot's deps.
+    source = (Path(__file__).parent.parent / "patchpilot" / "bench" / "harness_shim.py").read_text(
+        encoding="utf-8"
+    )
+    for forbidden in ("import patchpilot", "from patchpilot", "from ..", "from ."):
+        assert forbidden not in source, f"shim must not {forbidden!r}"
+
+
+# --- how the headline percentage is computed ---------------------------------
+
+
+def _rate(resolved: int, unresolved: int, empty: int = 0, error: int = 0) -> float | None:
+    from patchpilot.db.models import BenchmarkRun
+
+    run = BenchmarkRun(
+        resolved_tasks=resolved,
+        unresolved_tasks=unresolved,
+        empty_patch_tasks=empty,
+        error_tasks=error,
+        evaluated=True,
+    )
+    return run.resolve_rate
+
+
+def test_a_task_with_no_patch_counts_against_the_resolve_rate() -> None:
+    """SWE-bench scores resolved/attempted, not resolved/graded.
+
+    Giving up on an instance produces an empty patch, which the harness reports
+    separately from UNRESOLVED. Excluding those from the denominator would mean
+    an agent that quit on 6 of 15 tasks scored *higher* (4/9 = 44.4%) than one
+    that attempted all 15 with the same 4 successes (4/15 = 26.7%).
+    """
+    assert _rate(resolved=4, unresolved=5, empty=6) == 26.7
+    assert _rate(resolved=4, unresolved=5) == 44.4  # same patches, nothing skipped
+    # Harness infrastructure errors are failures of the batch too.
+    assert _rate(resolved=1, unresolved=1, error=2) == 25.0
+
+
+def test_an_ungraded_batch_has_no_rate_at_all() -> None:
+    from patchpilot.db.models import BenchmarkRun
+
+    run = BenchmarkRun(
+        resolved_tasks=0, unresolved_tasks=0, empty_patch_tasks=0, error_tasks=0, evaluated=False
+    )
+    assert run.resolve_rate is None, "an ungraded batch must not render as 0%"

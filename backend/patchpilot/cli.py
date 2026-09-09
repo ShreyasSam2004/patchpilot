@@ -458,13 +458,13 @@ def bench_resume_bullet() -> None:
                 )
                 return
             best = max(graded, key=lambda b: (b.resolve_rate or 0, b.total_tasks))
-            attempted = best.resolved_tasks + best.unresolved_tasks
+            attempted = best.attempted_tasks
             console.print(
                 Panel(
                     "Built PatchPilot, an autonomous software-engineering agent using LLM "
                     "tool-calling, MCP-compatible repository tools, iterative test-feedback "
                     "loops, and isolated code execution; resolved "
-                    f"[bold]{best.resolve_rate}%[/] of {attempted} evaluated SWE-bench Lite "
+                    f"[bold]{best.resolve_rate}%[/] of {attempted} attempted SWE-bench Lite "
                     f"tasks ({best.model}), graded by the official SWE-bench harness.",
                     title="Resume bullet (from real results)",
                     border_style="green",

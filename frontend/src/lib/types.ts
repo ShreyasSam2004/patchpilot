@@ -234,6 +234,9 @@ export interface Benchmark {
   error_tasks: number;
   empty_patch_tasks: number;
   evaluated: boolean;
+  /** Denominator of resolve_rate. Use this rather than summing buckets, so a
+   *  caption can never quote a total that disagrees with the percentage. */
+  attempted_tasks: number;
   /** null until the official harness has graded the batch. Never render as 0%. */
   resolve_rate: number | null;
   aggregate: Record<string, number | null | boolean>;

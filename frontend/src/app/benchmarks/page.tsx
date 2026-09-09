@@ -340,7 +340,7 @@ export default function BenchmarksPage() {
                     <strong className="text-[var(--color-ok)]">
                       {formatPercent(best.resolve_rate)}
                     </strong>{" "}
-                    of {best.resolved_tasks + best.unresolved_tasks} evaluated SWE-bench
+                    of {best.attempted_tasks} attempted SWE-bench
                     Lite tasks ({best.model}), graded by the official SWE-bench harness.
                   </p>
                 </div>

@@ -135,11 +135,11 @@ async def leaderboard(session: AsyncSession = Depends(get_session)) -> dict[str,
 
 def _resume_bullet(benchmark: BenchmarkRun) -> str:
     """Generate a resume line from real, evaluator-confirmed numbers only."""
-    attempted = benchmark.resolved_tasks + benchmark.unresolved_tasks
+    attempted = benchmark.attempted_tasks
     return (
         "Built PatchPilot, an autonomous software-engineering agent using LLM tool-calling, "
         "MCP-compatible repository tools, iterative test-feedback loops, and isolated code "
-        f"execution; resolved {benchmark.resolve_rate}% of {attempted} evaluated SWE-bench "
+        f"execution; resolved {benchmark.resolve_rate}% of {attempted} attempted SWE-bench "
         f"Lite tasks ({benchmark.model}), graded by the official SWE-bench harness."
     )
 

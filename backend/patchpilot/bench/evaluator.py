@@ -35,11 +35,34 @@ from typing import Any
 from ..config import Settings
 from ..domain.enums import BenchmarkStatus
 from ..logging_setup import get_logger
-from ..sandbox.docker import docker_available
+from ..sandbox.docker import docker_available, image_present
 
 log = get_logger(__name__)
 
 HARNESS_MODULE = "swebench.harness.run_evaluation"
+
+#: The harness is launched through this shim rather than with ``-m``. It
+#: forces the generated ``eval.sh`` to use LF so bash inside the container
+#: does not receive a trailing carriage return on every command; see its
+#: docstring.
+#: Referenced by path because ``swebench_python`` may be an interpreter that
+#: has swebench installed but not patchpilot.
+HARNESS_SHIM = Path(__file__).with_name("harness_shim.py")
+
+#: swebench >= 5 reads an ``image`` column that only the SWE-bench/* datasets
+#: carry. The princeton-nlp/* mirrors are the same 300 instances under the old
+#: schema, so a batch recorded against one is remapped here rather than failing
+#: with `KeyError: 'image'` once every patch has already been generated.
+HARNESS_DATASET_ALIASES: dict[str, str] = {
+    "princeton-nlp/SWE-bench_Lite": "SWE-bench/SWE-bench_Lite",
+    "princeton-nlp/SWE-bench_Verified": "SWE-bench/SWE-bench_Verified",
+    "princeton-nlp/SWE-bench": "SWE-bench/SWE-bench",
+}
+
+
+def harness_dataset_name(dataset: str) -> str:
+    """The dataset name to hand the official harness."""
+    return HARNESS_DATASET_ALIASES.get(dataset, dataset)
 
 
 @dataclass(slots=True)
@@ -99,7 +122,7 @@ def write_predictions(path: Path, predictions: list[Prediction]) -> Path:
     return path
 
 
-def required_disk_gb(instance_count: int | None) -> float:
+def required_disk_gb(instance_count: int | None, missing_images: int | None = None) -> float:
     """Disk the harness plausibly needs for a batch of this size.
 
     The ~120 GB in the official docs is for the *full* 300-instance run. A
@@ -107,14 +130,35 @@ def required_disk_gb(instance_count: int | None) -> float:
     almost all of their layers -- measured here: the first sympy image cost
     3.6 GB, the second 288 MB, the third 87 MB. Blocking a 15-instance batch
     because the machine lacks 120 GB would refuse work that comfortably fits.
+
+    ``missing_images`` refines it further: generation has usually already
+    pulled each instance's image, and evaluation reuses them. Only images that
+    still have to be fetched cost new disk; the rest need working space alone.
     """
     if instance_count is None:
         return 50.0
-    return max(10.0, 5.0 + 0.6 * instance_count)
+    to_pull = instance_count if missing_images is None else missing_images
+    # 5 GB working space, plus ~0.6 GB for each image not already local.
+    return max(6.0, 5.0 + 0.6 * to_pull)
+
+
+async def _missing_instance_images(instance_ids: list[str] | None) -> int | None:
+    """How many of the batch's instance images are not present locally."""
+    if not instance_ids:
+        return None
+    from .images import instance_image_name
+
+    missing = 0
+    for instance_id in instance_ids:
+        if not await image_present(instance_image_name(instance_id)):
+            missing += 1
+    return missing
 
 
 async def evaluator_preflight(
-    settings: Settings, instance_count: int | None = None
+    settings: Settings,
+    instance_count: int | None = None,
+    instance_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Check every prerequisite the harness has, before spending money."""
     problems: list[str] = []
@@ -132,12 +176,11 @@ async def evaluator_preflight(
         )
 
     free_gb = _free_disk_gb(settings.swebench_run_root)
-    needed = required_disk_gb(instance_count)
+    missing = await _missing_instance_images(instance_ids) if docker_ok else None
+    needed = required_disk_gb(instance_count, missing)
     notes: list[str] = []
     if free_gb is not None and free_gb < needed:
-        scope = (
-            f"{instance_count} instances" if instance_count else "a full run"
-        )
+        scope = f"{instance_count} instances" if instance_count else "a full run"
         problems.append(
             f"only {free_gb:.0f} GB free on the SWE-bench working volume; "
             f"evaluating {scope} needs roughly {needed:.0f} GB."
@@ -156,6 +199,7 @@ async def evaluator_preflight(
         "free_disk_gb": round(free_gb, 1) if free_gb is not None else None,
         "required_disk_gb": needed,
         "instance_count": instance_count,
+        "images_to_pull": missing,
         "ready": not problems,
         "problems": problems,
         "notes": notes,
@@ -206,13 +250,17 @@ async def run_official_evaluation(
 
     argv = [
         python,
-        "-m",
-        HARNESS_MODULE,
-        "--dataset_name", dataset,
-        "--split", split,
-        "--predictions_path", str(predictions_path),
-        "--max_workers", str(settings.swebench_max_workers),
-        "--run_id", run_key,
+        str(HARNESS_SHIM),
+        "--dataset_name",
+        harness_dataset_name(dataset),
+        "--split",
+        split,
+        "--predictions_path",
+        str(predictions_path),
+        "--max_workers",
+        str(settings.swebench_max_workers),
+        "--run_id",
+        run_key,
     ]
     if instance_ids:
         argv += ["--instance_ids", *instance_ids]
@@ -240,8 +288,7 @@ async def run_official_evaluation(
         return EvaluationOutcome(
             ok=False,
             error=(
-                f"the SWE-bench harness exceeded "
-                f"{settings.swebench_eval_timeout_s}s and was killed"
+                f"the SWE-bench harness exceeded {settings.swebench_eval_timeout_s}s and was killed"
             ),
         )
 

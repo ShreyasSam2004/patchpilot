@@ -344,6 +344,11 @@ class BenchmarkOut(BaseModel):
     error_tasks: int
     empty_patch_tasks: int
     evaluated: bool
+    attempted_tasks: int
+    """Denominator of ``resolve_rate``: resolved + unresolved + empty + error.
+
+    Exposed so a caption cannot derive its own total and print a count that
+    disagrees with the percentage next to it."""
     resolve_rate: float | None
     aggregate: dict[str, Any]
     evaluator_detail: dict[str, Any]
@@ -371,6 +376,7 @@ class BenchmarkOut(BaseModel):
             error_tasks=benchmark.error_tasks,
             empty_patch_tasks=benchmark.empty_patch_tasks,
             evaluated=benchmark.evaluated,
+            attempted_tasks=benchmark.attempted_tasks,
             resolve_rate=benchmark.resolve_rate,
             aggregate=benchmark.aggregate or {},
             evaluator_detail=benchmark.evaluator_detail or {},

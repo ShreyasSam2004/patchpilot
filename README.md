@@ -418,20 +418,62 @@ upgrade or downgrade does not silently produce "no results". See
 
 <!-- RESULTS -->
 
-**No SWE-bench Lite batch has been evaluated in this repository yet.**
+### SWE-bench Lite, 15 instances
 
-This section is intentionally empty. It will be filled in only from a real
-`bench run` whose patches were graded by the official harness — the numbers come
-from `patchpilot bench resume-bullet`, which reads the persisted
-evaluator verdicts and refuses to print anything if none exist.
+Produced by one real batch. Every patch was graded by the official
+`swebench` harness (v5.0.2); PatchPilot never decides its own score.
 
-To produce them you need an API key, a running Docker daemon, and disk space:
+| | |
+|---|---|
+| **Resolved** | **4 / 15 = 26.7%** |
+| Unresolved (patch applied, tests still failed) | 5 |
+| No patch produced (agent hit its iteration budget) | 6 |
+| Harness errors | 0 |
+| Model | `claude-sonnet-5`, effort `high` |
+| Sandbox | Docker, per-instance SWE-bench images, `--network none` |
+| Cost | $6.85 total (~$0.46 per instance) |
+| Agent work | 21.3 iterations and 25.0 tool calls per instance on average |
+| Wall clock | 123 minutes of agent time, plus evaluation |
+| Harness run id | `patchpilot-3gatuz` |
+
+Resolved: `sympy__sympy-12419`, `sympy__sympy-12481`, `sympy__sympy-13471`,
+`sympy__sympy-13480`.
+
+The denominator is all 15 instances the batch took on, which is the SWE-bench
+convention. An instance the agent gave up on is a failure, not an exclusion --
+scoring only the 9 graded patches would report 44.4% for strictly worse work.
+
+Reproduce, or run your own:
 
 ```bash
-patchpilot doctor                # confirm all three
-patchpilot bench run --limit 10
-patchpilot bench resume-bullet
+patchpilot doctor                # API key, Docker daemon, disk
+patchpilot bench run --limit 15
+patchpilot bench resume-bullet   # prints only evaluator-confirmed numbers
 ```
+
+#### The agent is a poor judge of its own work
+
+PatchPilot records the agent's own verdict (`agent_status`) separately from the
+harness's (`benchmark_status`), and they disagree badly:
+
+- of the 5 instances the agent declared RESOLVED, the harness confirmed **2**
+- of the 4 it did *not* claim but still left a gradeable patch, the harness
+  found **2 resolved**
+
+Self-reported success rate would have been 33%; the real number is 26.7%, and
+it is right for different instances. This is the reason the two columns exist
+and the reason grading is delegated entirely to the official harness.
+
+#### Where the 11 failures went
+
+Six instances produced no patch at all. Five of them stopped at exactly
+iteration 22, the configured cap: the agent spent its entire budget reading and
+hypothesising and never committed an edit. Those are six guaranteed failures
+that never reached the grader, and the single largest lever available -- this
+batch ran deliberately tight (`max_iterations` 22, `max_runtime_s` 900,
+`max_cost_usd` 2.00 per instance) to keep the run affordable.
+
+The other five patches applied cleanly but did not satisfy `FAIL_TO_PASS`.
 
 <!-- /RESULTS -->
 

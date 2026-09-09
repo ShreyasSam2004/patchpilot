@@ -22,7 +22,11 @@ from ..logging_setup import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_DATASET = "princeton-nlp/SWE-bench_Lite"
+#: swebench >= 5 requires the dataset rows to carry an ``image`` column, which
+#: only the SWE-bench/* copies have. The princeton-nlp/* mirrors hold the same
+#: 300 instances under the older schema, and passing one to the harness fails
+#: with `KeyError: 'image'` after the whole batch has already been generated.
+DEFAULT_DATASET = "SWE-bench/SWE-bench_Lite"
 DEFAULT_SPLIT = "test"
 
 #: The dataset moved organisations; both names refer to the same data. We try

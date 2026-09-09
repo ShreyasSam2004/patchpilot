@@ -290,13 +290,32 @@ class BenchmarkRun(Base):
     def resolve_rate(self) -> float | None:
         """Resolved / attempted, as a percentage. ``None`` before evaluation.
 
+        The denominator is every task the batch took on, which is the SWE-bench
+        convention: an instance the agent produced no patch for, or that errored
+        in the harness, is a task it failed, not a task that does not count.
+        Dividing by graded patches alone turns "gave up on 6 of 15" into a
+        higher score than "attempted all 15", which is backwards.
+
         Deliberately returns ``None`` rather than 0.0 when nothing has been
         evaluated, so the UI can show "not evaluated" instead of "0%".
         """
-        attempted = self.resolved_tasks + self.unresolved_tasks
-        if not self.evaluated or attempted == 0:
+        if not self.evaluated or self.attempted_tasks == 0:
             return None
-        return round(self.resolved_tasks / attempted * 100, 1)
+        return round(self.resolved_tasks / self.attempted_tasks * 100, 1)
+
+    @property
+    def attempted_tasks(self) -> int:
+        """Denominator for the resolve rate: every task the batch took on.
+
+        One source of truth, so a caption can never quote a count that does not
+        match the percentage printed beside it.
+        """
+        return (
+            self.resolved_tasks
+            + self.unresolved_tasks
+            + self.empty_patch_tasks
+            + self.error_tasks
+        )
 
 
 class BenchmarkTask(Base):

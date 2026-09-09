@@ -115,9 +115,7 @@ async def create_benchmark(
                 "dataset": dataset,
                 "split": split,
                 "selection": (
-                    "explicit"
-                    if instance_ids
-                    else f"sorted[{offset}:{offset + (limit or 0)}]"
+                    "explicit" if instance_ids else f"sorted[{offset}:{offset + (limit or 0)}]"
                 ),
             },
         },
@@ -173,8 +171,7 @@ async def execute_benchmark(benchmark_id: str, settings: Settings | None = None)
 
     try:
         instances = {
-            i.instance_id: i
-            for i in load_instances(dataset, split, instance_ids=instance_ids)
+            i.instance_id: i for i in load_instances(dataset, split, instance_ids=instance_ids)
         }
 
         for instance_id in instance_ids:
@@ -188,9 +185,7 @@ async def execute_benchmark(benchmark_id: str, settings: Settings | None = None)
             await _run_one_task(benchmark_id, instances[instance_id], config, settings)
 
         if config.get("evaluate", True):
-            await _evaluate_batch(
-                benchmark_id, run_key, dataset, split, model_name, settings
-            )
+            await _evaluate_batch(benchmark_id, run_key, dataset, split, model_name, settings)
         else:
             async with session_scope(settings) as session:
                 await _recompute(session, benchmark_id)
@@ -258,9 +253,7 @@ async def _run_one_task(
     # In the docker sandbox, run inside the official per-instance image: it has
     # the repository's dependencies installed, so `run_tests` observes what the
     # evaluator will. A generic image cannot import numpy, scipy, Django, ...
-    use_instance_image = (
-        sandbox_kind == "docker" and settings.swebench_instance_images
-    )
+    use_instance_image = sandbox_kind == "docker" and settings.swebench_instance_images
     session_config = SessionConfig(
         provider=config.get("provider"),
         model=config.get("model"),
@@ -347,10 +340,14 @@ async def _evaluate_batch(
             return
         benchmark.status = str(BenchmarkRunStatus.EVALUATING)
         tasks = (
-            await session.execute(
-                sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+            (
+                await session.execute(
+                    sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         predictions = [
             Prediction(
                 instance_id=t.instance_id,
@@ -364,7 +361,9 @@ async def _evaluate_batch(
     work_dir = settings.swebench_run_root / run_key
     predictions_path = write_predictions(work_dir / "predictions.jsonl", predictions)
 
-    preflight = await evaluator_preflight(settings, instance_count=len(instance_ids))
+    preflight = await evaluator_preflight(
+        settings, instance_count=len(instance_ids), instance_ids=instance_ids
+    )
     if not preflight["ready"]:
         log.warning("benchmark.evaluation_skipped", problems=preflight["problems"])
         async with session_scope(settings) as session:
@@ -377,9 +376,8 @@ async def _evaluate_batch(
                     "preflight": preflight,
                     "predictions_path": str(predictions_path),
                 }
-                benchmark.error = (
-                    "Patches were generated but NOT evaluated: "
-                    + "; ".join(preflight["problems"])
+                benchmark.error = "Patches were generated but NOT evaluated: " + "; ".join(
+                    preflight["problems"]
                 )
                 await _recompute(session, benchmark_id)
                 await _finish(session, benchmark_id, BenchmarkRunStatus.COMPLETED)
@@ -401,10 +399,14 @@ async def _evaluate_batch(
         if benchmark is None:
             return
         tasks = (
-            await session.execute(
-                sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+            (
+                await session.execute(
+                    sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         if outcome.ok:
             for task in tasks:
@@ -437,10 +439,14 @@ async def _recompute(session, benchmark_id: str) -> None:
     if benchmark is None:
         return
     tasks = (
-        await session.execute(
-            sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+        (
+            await session.execute(
+                sa.select(BenchmarkTask).where(BenchmarkTask.benchmark_id == benchmark_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     resolved = sum(1 for t in tasks if t.benchmark_status == str(BenchmarkStatus.RESOLVED))
     unresolved = sum(1 for t in tasks if t.benchmark_status == str(BenchmarkStatus.UNRESOLVED))
@@ -449,8 +455,7 @@ async def _recompute(session, benchmark_id: str) -> None:
     completed = sum(
         1
         for t in tasks
-        if t.benchmark_status
-        not in {str(BenchmarkStatus.PENDING), str(BenchmarkStatus.RUNNING)}
+        if t.benchmark_status not in {str(BenchmarkStatus.PENDING), str(BenchmarkStatus.RUNNING)}
     )
 
     benchmark.resolved_tasks = resolved
@@ -518,19 +523,31 @@ async def reevaluate(benchmark_id: str, settings: Settings | None = None) -> Non
     """Re-run only the official evaluation for an existing batch.
 
     Used when a batch generated patches but could not be graded — for example
-    because Docker was unavailable at the time.
+    because Docker was unavailable at the time, or because the grading
+    itself was faulty and its verdicts have to be discarded.
+
+    A *fresh* harness run_id is minted. The harness treats an instance that
+    already has a ``report.json`` under its run_id as done and skips it, so
+    reusing the old key returns the previous verdicts in seconds without
+    starting a single container -- which looks exactly like a successful
+    re-grade. The new key is persisted, so a batch always points at the
+    logs that produced the numbers it displays.
     """
     settings = settings or get_settings()
     async with session_scope(settings) as session:
         benchmark = await session.get(BenchmarkRun, benchmark_id)
         if benchmark is None:
             return
-        run_key, dataset, split, model = (
-            benchmark.run_key,
-            benchmark.dataset,
-            benchmark.split,
-            benchmark.model,
-        )
+        previous_key = benchmark.run_key
+        run_key = f"patchpilot-{short_code(6).lower()}"
+        benchmark.run_key = run_key
+        dataset, split, model = benchmark.dataset, benchmark.split, benchmark.model
+    log.info(
+        "benchmark.reevaluating",
+        benchmark_id=benchmark_id,
+        previous_run_key=previous_key,
+        run_key=run_key,
+    )
     await _evaluate_batch(benchmark_id, run_key, dataset, split, model, settings)
 
 

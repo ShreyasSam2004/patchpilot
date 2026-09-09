@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     mcp_config_path: Path = REPO_ROOT / "mcp.config.json"
 
     # ---- benchmark ---------------------------------------------------------
-    swebench_dataset: str = "princeton-nlp/SWE-bench_Lite"
+    swebench_dataset: str = "SWE-bench/SWE-bench_Lite"
     swebench_split: str = "test"
     swebench_run_root: Path = BACKEND_ROOT / "data" / "swebench"
     swebench_max_workers: int = 4
