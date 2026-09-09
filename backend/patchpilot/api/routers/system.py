@@ -55,7 +55,7 @@ async def status(
 
     warnings: list[str] = []
     if not provider["ready"]:
-        warnings.append(provider["detail"])
+        warnings.append(str(provider["detail"]))
     if provider.get("is_test_double"):
         warnings.append(
             "The scripted test-double provider is selected. Runs will not use a real model."

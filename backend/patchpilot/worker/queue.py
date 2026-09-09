@@ -17,8 +17,10 @@ multi-minute agent run.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import sqlalchemy as sa
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import BenchmarkRun, Run
@@ -45,15 +47,18 @@ async def claim_next_run(session: AsyncSession, worker_id: str) -> Run | None:
 
     now = datetime.now(UTC)
     for run_id in candidates:
-        result = await session.execute(
-            sa.update(Run)
-            .where(Run.id == run_id, Run.state == str(RunState.PENDING))
-            .values(
-                state=str(RunState.PREPARING),
-                worker_id=worker_id,
-                started_at=now,
-                heartbeat_at=now,
-            )
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                sa.update(Run)
+                .where(Run.id == run_id, Run.state == str(RunState.PENDING))
+                .values(
+                    state=str(RunState.PREPARING),
+                    worker_id=worker_id,
+                    started_at=now,
+                    heartbeat_at=now,
+                )
+            ),
         )
         if result.rowcount == 1:
             await session.commit()
@@ -76,13 +81,19 @@ async def claim_next_benchmark(session: AsyncSession, worker_id: str) -> Benchma
     ).scalars().all()
 
     for benchmark_id in candidates:
-        result = await session.execute(
-            sa.update(BenchmarkRun)
-            .where(
-                BenchmarkRun.id == benchmark_id,
-                BenchmarkRun.status == str(BenchmarkRunStatus.PENDING),
-            )
-            .values(status=str(BenchmarkRunStatus.GENERATING), started_at=datetime.now(UTC))
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                sa.update(BenchmarkRun)
+                .where(
+                    BenchmarkRun.id == benchmark_id,
+                    BenchmarkRun.status == str(BenchmarkRunStatus.PENDING),
+                )
+                .values(
+                    status=str(BenchmarkRunStatus.GENERATING),
+                    started_at=datetime.now(UTC),
+                )
+            ),
         )
         if result.rowcount == 1:
             await session.commit()
@@ -117,13 +128,21 @@ async def requeue_stale_runs(session: AsyncSession) -> int:
         str(RunState.TESTING),
         str(RunState.REFLECTING),
     ]
-    result = await session.execute(
-        sa.update(Run)
-        .where(
-            Run.state.in_(active),
-            sa.or_(Run.heartbeat_at.is_(None), Run.heartbeat_at < cutoff),
-        )
-        .values(state=str(RunState.PENDING), worker_id=None, started_at=None, heartbeat_at=None)
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            sa.update(Run)
+            .where(
+                Run.state.in_(active),
+                sa.or_(Run.heartbeat_at.is_(None), Run.heartbeat_at < cutoff),
+            )
+            .values(
+                state=str(RunState.PENDING),
+                worker_id=None,
+                started_at=None,
+                heartbeat_at=None,
+            )
+        ),
     )
     count = int(result.rowcount or 0)
     if count:

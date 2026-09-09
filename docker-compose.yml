@@ -1,0 +1,82 @@
+# PatchPilot with PostgreSQL.
+#
+#   cp .env.example .env      # add your model API key
+#   docker compose up --build
+#
+# The worker mounts the host Docker socket so it can start per-run evaluation
+# containers. That grants the worker container root-equivalent access to the
+# host — acceptable for a local developer tool, NOT for a shared deployment.
+# See docs/SECURITY.md before exposing this beyond localhost.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: patchpilot
+      POSTGRES_PASSWORD: patchpilot
+      POSTGRES_DB: patchpilot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patchpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    command: >
+      python -m uvicorn patchpilot.api.app:app --host 0.0.0.0 --port 8000
+    environment:
+      PATCHPILOT_DATABASE_URL: postgresql+asyncpg://patchpilot:patchpilot@db:5432/patchpilot
+      PATCHPILOT_WORKER_ENABLED: "false"   # the worker service owns execution
+      PATCHPILOT_API_HOST: 0.0.0.0
+      PATCHPILOT_CORS_ORIGINS: http://localhost:3000
+      PATCHPILOT_PROVIDER: ${PATCHPILOT_PROVIDER:-anthropic}
+      PATCHPILOT_MODEL: ${PATCHPILOT_MODEL:-claude-sonnet-5}
+      PATCHPILOT_ANTHROPIC_API_KEY: ${PATCHPILOT_ANTHROPIC_API_KEY:-}
+      PATCHPILOT_OPENAI_API_KEY: ${PATCHPILOT_OPENAI_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - workspaces:/app/workspaces
+      - benchdata:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    command: python -m patchpilot.worker
+    environment:
+      PATCHPILOT_DATABASE_URL: postgresql+asyncpg://patchpilot:patchpilot@db:5432/patchpilot
+      PATCHPILOT_SANDBOX: docker
+      PATCHPILOT_WORKER_CONCURRENCY: 2
+      PATCHPILOT_PROVIDER: ${PATCHPILOT_PROVIDER:-anthropic}
+      PATCHPILOT_MODEL: ${PATCHPILOT_MODEL:-claude-sonnet-5}
+      PATCHPILOT_ANTHROPIC_API_KEY: ${PATCHPILOT_ANTHROPIC_API_KEY:-}
+      PATCHPILOT_OPENAI_API_KEY: ${PATCHPILOT_OPENAI_API_KEY:-}
+    volumes:
+      - workspaces:/app/workspaces
+      - benchdata:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      PATCHPILOT_API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  workspaces:
+  benchdata:

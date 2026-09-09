@@ -141,3 +141,44 @@ def test_info_admits_its_limits(sandbox: LocalSandbox) -> None:
     assert info.kind == "local"
     assert info.isolation == "process"
     assert any("kernel-level" in warning for warning in info.warnings)
+
+
+# ------------------------------------------------- interpreter normalisation
+
+
+def test_bare_python_maps_to_the_running_interpreter(sandbox: LocalSandbox) -> None:
+    """A bare `python` on PATH is often a different interpreter than ours.
+
+    Without this, `python -m pytest` — the single most common test command —
+    fails with "No module named pytest" whenever PatchPilot runs from a
+    virtualenv, and the agent can never validate a fix.
+    """
+    for name in ("python", "python3", "py"):
+        assert sandbox.normalize_argv([name, "-m", "pytest"]) == [
+            sys.executable,
+            "-m",
+            "pytest",
+        ]
+
+
+def test_an_explicit_interpreter_path_is_left_alone(sandbox: LocalSandbox) -> None:
+    argv = ["/usr/bin/python3", "-c", "pass"]
+    assert sandbox.normalize_argv(argv) == argv
+    argv = [r"C:\Python312\python.exe", "-c", "pass"]
+    assert sandbox.normalize_argv(argv) == argv
+
+
+def test_other_executables_are_untouched(sandbox: LocalSandbox) -> None:
+    for argv in (["npm", "test"], ["tox", "-e", "py311"], ["git", "diff"]):
+        assert sandbox.normalize_argv(argv) == argv
+
+
+async def test_bare_python_actually_runs_our_interpreter(sandbox: LocalSandbox) -> None:
+    result = await sandbox.exec(["python", "-c", "import sys; print(sys.executable)"])
+    assert result.ok
+    assert result.stdout.strip() == sys.executable
+
+
+async def test_bare_python_can_import_pytest(sandbox: LocalSandbox) -> None:
+    result = await sandbox.exec(["python", "-m", "pytest", "--version"])
+    assert result.ok, result.combined_output

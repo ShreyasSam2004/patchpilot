@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -83,14 +83,20 @@ class ToolContext:
 
 
 class Tool(ABC, Generic[ArgsT]):
-    """Base class for every tool the agent can call."""
+    """Base class for every tool the agent can call.
 
-    name: ClassVar[str]
-    description: ClassVar[str]
-    args_model: ClassVar[type[BaseModel]]
-    origin: ClassVar[ToolOrigin] = ToolOrigin.NATIVE
-    timeout_s: ClassVar[float] = 60.0
-    mutating: ClassVar[bool] = False
+    These are declared as ordinary attributes rather than ``ClassVar`` on
+    purpose. Native tools set them once at class level, but MCP tools are
+    discovered at runtime and must set them per instance — ``ClassVar`` would
+    forbid exactly that.
+    """
+
+    name: str
+    description: str
+    args_model: type[BaseModel]
+    origin: ToolOrigin = ToolOrigin.NATIVE
+    timeout_s: float = 60.0
+    mutating: bool = False
     """True if the tool can change the workspace — used by the anti-loop logic."""
 
     @abstractmethod

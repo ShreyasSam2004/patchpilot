@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -62,7 +63,9 @@ def _kill_tree(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
     try:
-        if _IS_WINDOWS:
+        # `sys.platform` (not a module-level constant) so type checkers can
+        # narrow away the POSIX-only calls on Windows and vice versa.
+        if sys.platform == "win32":
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True,
@@ -87,6 +90,37 @@ class LocalSandbox(Sandbox):
         super().__init__(root, limits)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def normalize_argv(self, argv: list[str]) -> list[str]:
+        """Point a bare interpreter name at the interpreter running PatchPilot.
+
+        ``python -m pytest`` is the most common test command there is, but a
+        bare ``python`` resolves against ``PATH``, which is frequently a
+        *different* interpreter from the one PatchPilot runs under — most
+        obviously when PatchPilot is installed in a virtualenv, because running
+        ``.venv/bin/python`` does not put ``.venv/bin`` on ``PATH``. The agent
+        then sees "No module named pytest" and cannot validate anything.
+
+        Since the local sandbox by definition executes in this host
+        environment, mapping the bare name onto ``sys.executable`` is both the
+        least surprising behaviour and the only one that reliably works. An
+        explicit path supplied by the caller is never rewritten, and the Docker
+        sandbox does not do this at all — the container has its own Python.
+        """
+        if not argv:
+            return argv
+        first = argv[0]
+        base = first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+
+        if first == base and base in {"python", "python3", "py"}:
+            return [sys.executable, *argv[1:]]
+
+        # A bare `pytest` that is not on PATH is almost always installed as a
+        # module in the current environment.
+        if first == base and base == "pytest" and shutil.which("pytest") is None:
+            return [sys.executable, "-m", "pytest", *argv[1:]]
+
+        return argv
+
     async def exec(
         self,
         argv: list[str],
@@ -98,6 +132,7 @@ class LocalSandbox(Sandbox):
         if not argv:
             raise ValueError("argv must not be empty")
 
+        argv = self.normalize_argv(argv)
         workdir = self.resolve_cwd(cwd)
         workdir.mkdir(parents=True, exist_ok=True)
         timeout = timeout_s or self.limits.timeout_s

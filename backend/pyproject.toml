@@ -60,7 +60,9 @@ ignore = ["B008", "RUF012"]
 "tests/*" = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+# No explicit python_version: mypy then uses the running interpreter, which
+# avoids parsing third-party stubs (numpy, via `datasets`) with an older
+# grammar than they were written for.
 plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 disallow_untyped_defs = false

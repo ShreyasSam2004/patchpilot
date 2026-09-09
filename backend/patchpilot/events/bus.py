@@ -136,7 +136,10 @@ class EventBus:
                 log.warning(
                     "events.sink_failed",
                     sink=type(sink).__name__,
-                    event=str(event_type),
+                    # NB: not `event=` — structlog reserves that key for the
+                    # message itself, and passing it here raises TypeError,
+                    # which would defeat the whole point of this handler.
+                    event_type=str(event_type),
                     error=str(exc),
                 )
         return event

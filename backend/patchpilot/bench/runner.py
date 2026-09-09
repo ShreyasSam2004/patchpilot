@@ -296,16 +296,16 @@ async def _run_one_task(
     except Exception as exc:
         log.exception("benchmark.task_failed", instance=instance.instance_id)
         async with session_scope(settings) as session:
-            task = (
+            failed_task = (
                 await session.execute(
                     sa.select(BenchmarkTask).where(BenchmarkTask.run_id == run_id)
                 )
             ).scalar_one_or_none()
-            if task is not None:
-                task.agent_status = str(RunState.FAILED)
-                task.benchmark_status = str(BenchmarkStatus.ERROR)
-                task.error = f"{type(exc).__name__}: {exc}"
-                task.finished_at = datetime.now(UTC)
+            if failed_task is not None:
+                failed_task.agent_status = str(RunState.FAILED)
+                failed_task.benchmark_status = str(BenchmarkStatus.ERROR)
+                failed_task.error = f"{type(exc).__name__}: {exc}"
+                failed_task.finished_at = datetime.now(UTC)
             await _recompute(session, benchmark_id)
 
 
@@ -442,8 +442,11 @@ async def _recompute(session, benchmark_id: str) -> None:
 def _aggregate(tasks: list[BenchmarkTask], benchmark: BenchmarkRun) -> dict[str, Any]:
     """Per-batch statistics, computed only from real task rows."""
     metrics = [t.metrics or {} for t in tasks if t.metrics]
-    finished = [t for t in tasks if t.started_at and t.finished_at]
-    durations = [(t.finished_at - t.started_at).total_seconds() for t in finished]
+    durations = [
+        (t.finished_at - t.started_at).total_seconds()
+        for t in tasks
+        if t.started_at is not None and t.finished_at is not None
+    ]
 
     def mean(values: list[float]) -> float | None:
         return round(sum(values) / len(values), 2) if values else None

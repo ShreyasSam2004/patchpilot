@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Copy to mcp.config.json and set PATCHPILOT_MCP_ENABLED=true.",
+    "",
+    "Discovery is not permission. Tools found on these servers are registered",
+    "and then filtered by PATCHPILOT_TOOL_ALLOW / PATCHPILOT_TOOL_DENY, so a",
+    "newly discovered tool is unreachable until an operator allows it by name.",
+    "",
+    "Inspect what a server offers, and what policy would do with it:",
+    "  patchpilot tools mcp",
+    "  curl localhost:8000/api/mcp/probe"
+  ],
+
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/absolute/path/to/a/repository"
+      ],
+      "enabled": false
+    },
+
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "/absolute/path/to/a/repository"],
+      "enabled": false
+    },
+
+    "example-with-env": {
+      "command": "my-mcp-server",
+      "args": ["--stdio"],
+      "env": {
+        "MY_SERVER_TOKEN": "set-this-in-your-real-config-not-here"
+      },
+      "enabled": false
+    }
+  }
+}
