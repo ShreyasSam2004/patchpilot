@@ -464,3 +464,83 @@ async def test_mcp_tools_shows_the_policy_verdict(client) -> None:
     names = {t["name"] for t in body["tools"]}
     assert "read_file" in names
     assert all(t["origin"] == "native" for t in body["tools"])
+
+
+# ------------------------------------------------------ timestamp round-trip
+
+
+async def test_timestamps_come_back_timezone_aware(app_settings) -> None:
+    """SQLite drops tzinfo, and the first subtraction then throws.
+
+    A 15-instance benchmark batch died with "can't subtract offset-naive and
+    offset-aware datetimes" before running a single task, because a timestamp
+    written as aware was read back naive and compared against a fresh
+    `datetime.now(UTC)`.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    async with session_scope(app_settings) as session:
+        run = Run(
+            id=new_id(),
+            code=short_code(),
+            repository="demo/tz",
+            issue="x" * 20,
+            state=str(RunState.PENDING),
+            started_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+
+    await dispose_db()
+    await init_db(app_settings)
+
+    async with session_scope(app_settings) as session:
+        reloaded = await session.get(Run, run_id)
+        assert reloaded is not None
+        assert reloaded.queued_at.tzinfo is not None, "queued_at lost its timezone"
+        assert reloaded.started_at is not None
+        assert reloaded.started_at.tzinfo is not None, "started_at lost its timezone"
+
+        # The operation that actually failed in production.
+        elapsed = datetime.now(UTC) - reloaded.started_at
+        assert isinstance(elapsed, timedelta)
+        assert elapsed.total_seconds() >= 0
+
+
+async def test_benchmark_aggregate_survives_reloaded_timestamps(app_settings) -> None:
+    """The exact call path that killed the batch: _aggregate over stored rows."""
+    from datetime import UTC, datetime, timedelta
+
+    from patchpilot.bench.runner import _recompute
+
+    async with session_scope(app_settings) as session:
+        benchmark = BenchmarkRun(
+            id=new_id(), name="tz", run_key="patchpilot-tz", model="m", total_tasks=1
+        )
+        session.add(benchmark)
+        await session.flush()
+        session.add(
+            BenchmarkTask(
+                id=new_id(),
+                benchmark_id=benchmark.id,
+                instance_id="a__a-1",
+                repo="o/r",
+                base_commit="abc",
+                problem_statement="p",
+                started_at=datetime.now(UTC) - timedelta(seconds=30),
+                finished_at=datetime.now(UTC),
+                metrics={"iterations": 3},
+            )
+        )
+        benchmark_id = benchmark.id
+
+    await dispose_db()
+    await init_db(app_settings)
+
+    async with session_scope(app_settings) as session:
+        await _recompute(session, benchmark_id)
+        refreshed = await session.get(BenchmarkRun, benchmark_id)
+        assert refreshed is not None
+        assert refreshed.aggregate["avg_runtime_s"] is not None
+        assert refreshed.aggregate["avg_runtime_s"] > 0

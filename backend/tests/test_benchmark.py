@@ -336,3 +336,45 @@ def test_docker_arch_maps_apple_silicon() -> None:
     assert docker_arch("aarch64") == "arm64"
     assert docker_arch("AMD64") == "x86_64"
     assert docker_arch("x86_64") == "x86_64"
+
+
+def test_disk_requirement_scales_with_batch_size() -> None:
+    """The ~120 GB figure is for the full 300-instance run, not for any batch.
+
+    A blanket 50 GB gate refused to evaluate a 15-instance same-repo batch that
+    needed about 6 GB of images — 75 minutes of generation produced patches
+    that were then never graded.
+    """
+    from patchpilot.bench.evaluator import required_disk_gb
+
+    assert required_disk_gb(1) == 10.0
+    assert required_disk_gb(15) == 14.0
+    assert required_disk_gb(300) == 185.0
+    # Unknown batch size stays conservative.
+    assert required_disk_gb(None) == 50.0
+    # Monotonic: a bigger batch never needs less.
+    sizes = [1, 5, 15, 50, 100, 300]
+    reqs = [required_disk_gb(n) for n in sizes]
+    assert reqs == sorted(reqs)
+
+
+async def test_preflight_passes_for_a_small_batch_on_a_modest_disk(settings) -> None:
+    from unittest.mock import patch
+
+    from patchpilot.bench.evaluator import evaluator_preflight
+
+    with (
+        patch("patchpilot.bench.evaluator._free_disk_gb", return_value=20.0),
+        patch("patchpilot.bench.evaluator._harness_installed", return_value=True),
+        patch(
+            "patchpilot.bench.evaluator.docker_available",
+            return_value=(True, "28.0 (linux)"),
+        ),
+    ):
+        small = await evaluator_preflight(settings, instance_count=15)
+        assert small["ready"] is True, small["problems"]
+        assert small["notes"], "a modest disk should still be mentioned"
+
+        full = await evaluator_preflight(settings, instance_count=300)
+        assert full["ready"] is False
+        assert "185 GB" in full["problems"][0]

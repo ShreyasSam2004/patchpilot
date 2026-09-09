@@ -39,7 +39,15 @@ async def claim_next_run(session: AsyncSession, worker_id: str) -> Run | None:
     candidates = (
         await session.execute(
             sa.select(Run.id)
-            .where(Run.state == str(RunState.PENDING))
+            .where(
+                Run.state == str(RunState.PENDING),
+                # Benchmark tasks are driven by the benchmark runner, which owns
+                # their configuration (per-instance image, budgets). If the
+                # generic worker also claimed them, two processes would run the
+                # same task concurrently with different settings -- which
+                # corrupted 15 clones of the same repo at once.
+                Run.benchmark_task_id.is_(None),
+            )
             .order_by(Run.queued_at)
             .limit(5)
         )

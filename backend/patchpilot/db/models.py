@@ -26,6 +26,31 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class UtcDateTime(sa.types.TypeDecorator):
+    """A datetime that always round-trips as timezone-aware UTC.
+
+    SQLite has no native datetime type, so ``DateTime(timezone=True)`` silently
+    drops the tzinfo: a value written as aware comes back naive. Mixing the two
+    raises "can't subtract offset-naive and offset-aware datetimes" at the first
+    piece of arithmetic — which is exactly how a benchmark batch died before it
+    ran a single task. Normalising on the way in and out makes the behaviour
+    identical on SQLite and PostgreSQL.
+    """
+
+    impl = sa.DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 class Base(DeclarativeBase):
     """Declarative base with a JSON type map."""
 
@@ -71,12 +96,12 @@ class Run(Base):
     metrics: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
 
     # -- worker bookkeeping -------------------------------------------------
-    queued_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
-    started_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(
-        sa.DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     cancel_requested: Mapped[bool] = mapped_column(sa.Boolean, default=False)
     last_seq: Mapped[int] = mapped_column(sa.Integer, default=0)
@@ -123,7 +148,7 @@ class Event(Base):
     type: Mapped[str] = mapped_column(sa.String(40), index=True)
     iteration: Mapped[int] = mapped_column(sa.Integer, default=0)
     payload: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
     run: Mapped[Run] = relationship(back_populates="events")
 
@@ -148,7 +173,7 @@ class ToolCallRow(Base):
     summary: Mapped[str] = mapped_column(sa.Text, default="")
     error_code: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
     duration_ms: Mapped[int] = mapped_column(sa.Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
     run: Mapped[Run] = relationship(back_populates="tool_calls")
 
@@ -168,7 +193,7 @@ class HypothesisRow(Base):
     proposed_fix: Mapped[str] = mapped_column(sa.Text, default="")
     validation_plan: Mapped[str] = mapped_column(sa.Text, default="")
     supersedes_previous: Mapped[bool] = mapped_column(sa.Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
     run: Mapped[Run] = relationship(back_populates="hypotheses")
 
@@ -187,7 +212,7 @@ class PatchRow(Base):
     deletions: Mapped[int] = mapped_column(sa.Integer, default=0)
     applied: Mapped[bool] = mapped_column(sa.Boolean, default=True)
     is_final: Mapped[bool] = mapped_column(sa.Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
     run: Mapped[Run] = relationship(back_populates="patches")
 
@@ -212,7 +237,7 @@ class TestRunRow(Base):
     duration_ms: Mapped[int] = mapped_column(sa.Integer, default=0)
     failing_tests: Mapped[list[str]] = mapped_column(sa.JSON, default=list)
     output: Mapped[str] = mapped_column(sa.Text, default="")
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
     run: Mapped[Run] = relationship(back_populates="test_runs")
 
@@ -252,9 +277,9 @@ class BenchmarkRun(Base):
 
     aggregate: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
 
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=utcnow)
-    started_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(sa.Boolean, default=False)
 
     tasks: Mapped[list[BenchmarkTask]] = relationship(
@@ -305,8 +330,8 @@ class BenchmarkTask(Base):
     metrics: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
     error: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
 
-    started_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
     benchmark: Mapped[BenchmarkRun] = relationship(
         back_populates="tasks", foreign_keys=[benchmark_id]

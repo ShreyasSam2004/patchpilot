@@ -345,3 +345,60 @@ async def test_fixture_tasks_all_run_end_to_end(e2e, monkeypatch) -> None:
         assert len(tests) == 1, fixture
         # Each fixture has a genuine bug, so its suite must be red at baseline.
         assert tests[0]["failed"] > 0, f"{fixture} should have failing tests"
+
+
+async def test_benchmark_runs_are_not_claimable_by_the_generic_worker(e2e) -> None:
+    """A benchmark task is executed inline by the benchmark runner.
+
+    When the generic worker could also claim it, two processes ran the same
+    task concurrently with different configuration — the worker used the
+    default sandbox image instead of the per-instance one, and 15 simultaneous
+    clones of the same repo corrupted each other
+    ("fetch-pack: invalid index-pack output").
+    """
+
+    from patchpilot.db.models import BenchmarkRun, BenchmarkTask, Run
+    from patchpilot.db.session import session_scope
+    from patchpilot.domain.enums import RunState
+    from patchpilot.ids import new_id, short_code
+    from patchpilot.worker.queue import claim_next_run
+
+    client, settings = e2e
+
+    async with session_scope(settings) as session:
+        benchmark = BenchmarkRun(id=new_id(), name="b", run_key="k", model="m")
+        session.add(benchmark)
+        await session.flush()
+        task = BenchmarkTask(
+            id=new_id(),
+            benchmark_id=benchmark.id,
+            instance_id="a__a-1",
+            repo="o/r",
+            base_commit="abc",
+            problem_statement="p",
+        )
+        session.add(task)
+        await session.flush()
+        # A benchmark-owned run, left PENDING to model the worst case.
+        session.add(
+            Run(
+                id=new_id(),
+                code=short_code(),
+                repository="o/r",
+                issue="x" * 20,
+                state=str(RunState.PENDING),
+                benchmark_task_id=task.id,
+            )
+        )
+
+    async with session_scope(settings) as session:
+        assert await claim_next_run(session, "worker-1") is None, (
+            "the generic worker must not claim a benchmark task's run"
+        )
+
+    # An ordinary run is still claimable.
+    await client.post("/api/runs", json={"issue": "a" * 30, "fixture": "calculator_bug"})
+    async with session_scope(settings) as session:
+        claimed = await claim_next_run(session, "worker-1")
+        assert claimed is not None
+        assert claimed.benchmark_task_id is None

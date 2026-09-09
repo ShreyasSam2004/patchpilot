@@ -238,7 +238,9 @@ async def _run_one_task(
             model=config.get("model", settings.model),
             sandbox=config.get("sandbox", settings.sandbox),
             config=config,
-            state=str(RunState.PENDING),
+            # Not PENDING: this run is executed inline by the benchmark
+            # runner and must never sit claimable in the shared queue.
+            state=str(RunState.PREPARING),
             benchmark_task_id=task.id,
         )
         session.add(run)
@@ -273,7 +275,10 @@ async def _run_one_task(
             else None
         ),
         pull_image=use_instance_image,
-        allow_sandbox_fallback=True,
+        # No silent docker -> local downgrade here: a benchmark task that loses
+        # its per-instance image cannot run the repository's tests, and a
+        # result produced that way would not mean what it claims.
+        allow_sandbox_fallback=False,
     )
 
     log.info("benchmark.task_started", instance=instance.instance_id, run_id=run_id)
@@ -359,7 +364,7 @@ async def _evaluate_batch(
     work_dir = settings.swebench_run_root / run_key
     predictions_path = write_predictions(work_dir / "predictions.jsonl", predictions)
 
-    preflight = await evaluator_preflight(settings)
+    preflight = await evaluator_preflight(settings, instance_count=len(instance_ids))
     if not preflight["ready"]:
         log.warning("benchmark.evaluation_skipped", problems=preflight["problems"])
         async with session_scope(settings) as session:
