@@ -45,6 +45,10 @@ worker: ## Start a standalone worker process
 web: ## Start the frontend in development mode
 	cd frontend && npm run dev
 
+.PHONY: docker-image
+docker-image: ## Build the sandbox runner image (git + pytest, for --sandbox docker)
+	docker build -f backend/docker/runner.Dockerfile -t patchpilot/runner:latest backend
+
 .PHONY: doctor
 doctor: ## Check that a real run can actually work here
 	cd backend && ../$(PY) -m patchpilot.cli doctor

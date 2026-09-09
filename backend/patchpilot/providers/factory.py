@@ -30,6 +30,7 @@ def create_provider(
             model_name,
             api_key=settings.api_key_for("anthropic"),
             base_url=settings.anthropic_base_url,
+            effort=settings.effort,
         )
 
     if kind == "openai":

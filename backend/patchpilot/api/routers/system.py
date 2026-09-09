@@ -67,6 +67,12 @@ async def status(
         )
     if settings.sandbox == "docker" and not sandbox["docker_available"]:
         warnings.append(f"Docker sandbox configured but unavailable: {sandbox['docker_detail']}")
+    elif settings.sandbox == "docker" and not sandbox.get("docker_image_present"):
+        warnings.append(
+            f"Docker sandbox image {sandbox['docker_image']} is not built. Run: "
+            "docker build -f backend/docker/runner.Dockerfile "
+            "-t patchpilot/runner:latest backend"
+        )
     if not swebench["ready"]:
         warnings.extend(swebench.get("problems", []))
 

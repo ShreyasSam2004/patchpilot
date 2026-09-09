@@ -63,6 +63,14 @@ interpolation on either side of the boundary. Host-specific environment
 variables are stripped rather than passed through. A timeout kills the
 in-container process, not just the `docker exec` client.
 
+`--network none` has a consequence worth stating plainly: **nothing can be
+installed at run time.** The image must already contain git, a test runner, and
+the repository's dependencies. `backend/docker/runner.Dockerfile` builds a
+384 MB image with git and a standard pytest stack (`make docker-image`); derive
+from it for a project with extra dependencies. A missing image is caught before
+the container starts and reported with the build command, rather than
+`docker run` attempting a pull that cannot succeed.
+
 If the daemon is unreachable, construction **raises** rather than silently
 degrading; the caller decides whether to fall back, and the run record stores
 which sandbox was actually used.

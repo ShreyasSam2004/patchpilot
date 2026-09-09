@@ -34,8 +34,10 @@ class AnthropicProvider(ModelProvider):
         base_url: str | None = None,
         max_retries: int = 4,
         timeout_s: float = 300.0,
+        effort: str | None = "high",
     ) -> None:
         super().__init__(model)
+        self.effort = effort
         if not api_key:
             raise ConfigurationError(
                 "Anthropic provider requires an API key. Set PATCHPILOT_ANTHROPIC_API_KEY "
@@ -66,12 +68,20 @@ class AnthropicProvider(ModelProvider):
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": _to_anthropic_messages(messages),
             "system": [
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ],
         }
+
+        # Sampling parameters (temperature / top_p / top_k) were removed from the
+        # Messages API on the current Claude models — passing one is a 400, and
+        # anthropic>=1.x does not even accept the keyword. Reasoning depth and
+        # token spend are controlled by `output_config.effort` instead.
+        # `temperature` stays in the ModelProvider signature because OpenAI
+        # still honours it; here it is deliberately ignored.
+        if self.effort:
+            payload["output_config"] = {"effort": self.effort}
         if tools:
             payload["tools"] = [
                 {

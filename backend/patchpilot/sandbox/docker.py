@@ -56,6 +56,20 @@ async def _run_host(argv: list[str], timeout: int = 60) -> tuple[int, str, str]:
     )
 
 
+async def image_present(image: str) -> bool:
+    """Whether ``image`` already exists locally.
+
+    The sandbox runs with ``--network none``, so a missing image cannot be
+    pulled at run time by the container itself; `docker run` would try to pull
+    it first and fail with a confusing error. Checking up front lets us say
+    exactly what to build.
+    """
+    code, out, _ = await _run_host(
+        ["docker", "image", "inspect", image, "--format", "{{.Id}}"], timeout=30
+    )
+    return code == 0 and bool(out.strip())
+
+
 async def docker_available() -> tuple[bool, str]:
     """Check that the Docker CLI exists *and* the daemon answers."""
     if shutil.which("docker") is None:
@@ -97,6 +111,17 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 f"Docker sandbox requested but the daemon is unavailable: {detail}. "
                 "Start Docker, or set PATCHPILOT_SANDBOX=local (weaker isolation)."
+            )
+
+        if not await image_present(self.image):
+            raise SandboxError(
+                f"the sandbox image {self.image!r} is not present locally. The sandbox "
+                "runs with --network none and cannot pull it at run time. Build the "
+                "bundled runner image:\n"
+                "    docker build -f backend/docker/runner.Dockerfile "
+                "-t patchpilot/runner:latest backend\n"
+                "or set PATCHPILOT_DOCKER_IMAGE to an image that already contains git, "
+                "a test runner, and the repository's dependencies."
             )
 
         await self._remove_existing()

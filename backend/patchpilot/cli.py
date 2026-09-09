@@ -99,10 +99,23 @@ def doctor() -> None:
         f"{provider['model']} — {provider['detail']}",
     )
     sandbox = checks["sandbox"]
+    docker_usable = bool(sandbox["docker_available"]) and bool(
+        sandbox.get("docker_image_present")
+    )
     row(
         f"Sandbox ({settings.sandbox})",
-        settings.sandbox != "docker" or bool(sandbox["docker_available"]),
-        f"docker: {sandbox['docker_detail']}",
+        settings.sandbox != "docker" or docker_usable,
+        f"docker daemon: {sandbox['docker_detail']}",
+    )
+    row(
+        "Sandbox image",
+        bool(sandbox.get("docker_image_present")),
+        f"{sandbox.get('docker_image')} "
+        + (
+            "present"
+            if sandbox.get("docker_image_present")
+            else "- build it with: make docker-image"
+        ),
     )
     swebench = checks["swebench"]
     row("SWE-bench harness", bool(swebench["harness_installed"]), "pip install -e '.[swebench]'")

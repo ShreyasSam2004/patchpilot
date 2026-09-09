@@ -182,3 +182,40 @@ async def test_bare_python_actually_runs_our_interpreter(sandbox: LocalSandbox) 
 async def test_bare_python_can_import_pytest(sandbox: LocalSandbox) -> None:
     result = await sandbox.exec(["python", "-m", "pytest", "--version"])
     assert result.ok, result.combined_output
+
+
+# ------------------------------------------------------- docker sandbox image
+
+
+@pytest.mark.docker
+async def test_docker_sandbox_refuses_a_missing_image(tmp_path) -> None:
+    """The sandbox runs with --network none, so it cannot pull at run time.
+
+    Failing fast with the build command is far better than `docker run`
+    attempting a pull and dying with a confusing network error.
+    """
+    from patchpilot.errors import SandboxError
+    from patchpilot.sandbox.docker import DockerSandbox, docker_available
+
+    available, detail = await docker_available()
+    if not available:
+        pytest.skip(f"docker daemon unavailable: {detail}")
+
+    sandbox = DockerSandbox(
+        tmp_path / "ws",
+        image="patchpilot/definitely-not-built:missing",
+        container_name="patchpilot-test-missing-image",
+    )
+    with pytest.raises(SandboxError, match="not present locally"):
+        await sandbox.start()
+
+
+@pytest.mark.docker
+async def test_image_present_detects_a_real_image() -> None:
+    from patchpilot.sandbox.docker import docker_available, image_present
+
+    available, detail = await docker_available()
+    if not available:
+        pytest.skip(f"docker daemon unavailable: {detail}")
+
+    assert await image_present("patchpilot/definitely-not-built:missing") is False

@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     model: str = "claude-sonnet-5"
     max_output_tokens: int = 8192
     temperature: float = 0.0
+    """OpenAI only. The current Claude models reject sampling parameters; use
+    `effort` instead."""
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    """Anthropic reasoning depth / token spend. 'high' is the API default;
+    'xhigh' suits hard agentic coding work at higher cost."""
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
     openai_api_key: str | None = None
@@ -77,7 +82,11 @@ class Settings(BaseSettings):
 
     # ---- sandbox -----------------------------------------------------------
     sandbox: SandboxKind = "local"
-    docker_image: str = "python:3.11-slim"
+    docker_image: str = "patchpilot/runner:latest"
+    """Image for the Docker sandbox. It runs with --network none, so nothing can
+    be installed at run time: the image must already contain git, the test
+    runner, and the repository's dependencies. Build the bundled one with
+    `make docker-image`, or derive from it for a project with extra deps."""
     docker_memory: str = "2g"
     docker_cpus: str = "2"
     docker_pids_limit: int = 512

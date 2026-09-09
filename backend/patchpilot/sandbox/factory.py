@@ -13,7 +13,7 @@ from ..config import Settings
 from ..errors import SandboxError
 from ..logging_setup import get_logger
 from .base import Sandbox, SandboxLimits
-from .docker import DockerSandbox, docker_available
+from .docker import DockerSandbox, docker_available, image_present
 from .local import LocalSandbox
 
 log = get_logger(__name__)
@@ -69,11 +69,15 @@ async def create_sandbox(
 async def preflight(settings: Settings) -> dict[str, object]:
     """Report what isolation is genuinely available on this machine."""
     docker_ok, docker_detail = await docker_available()
+    has_image = await image_present(settings.docker_image) if docker_ok else False
+    usable = docker_ok and has_image
     return {
         "configured": settings.sandbox,
         "docker_available": docker_ok,
         "docker_detail": docker_detail,
+        "docker_image": settings.docker_image,
+        "docker_image_present": has_image,
         "effective": (
-            settings.sandbox if (settings.sandbox != "docker" or docker_ok) else "unavailable"
+            settings.sandbox if (settings.sandbox != "docker" or usable) else "unavailable"
         ),
     }

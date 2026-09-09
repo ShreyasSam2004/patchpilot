@@ -246,6 +246,7 @@ PATCHPILOT_MODEL=claude-sonnet-5
 PATCHPILOT_ANTHROPIC_API_KEY=sk-ant-...   # or ANTHROPIC_API_KEY
 
 PATCHPILOT_SANDBOX=local                  # local | docker
+# For docker, build the runner image first:  make docker-image
 PATCHPILOT_MAX_ITERATIONS=30
 PATCHPILOT_MAX_COST_USD=5.0
 
@@ -561,7 +562,10 @@ See [`docs/SECURITY.md`](docs/SECURITY.md).
   harness builds a container per instance. Without them, PatchPilot still
   generates patches but records the batch as `NOT EVALUATED`.
 - **The local sandbox is not a security boundary.** Use Docker for repositories
-  you do not trust.
+  you do not trust — and note that the Docker sandbox has no network, so the
+  image must be pre-provisioned with the repository's dependencies. The
+  bundled `patchpilot/runner` image covers git plus a standard pytest stack;
+  a project with extra dependencies needs a derived image.
 - **Python-first.** The tools work on any language, but symbol search,
   test-output parsing and the default test command are tuned for Python (with
   best-effort jest/unittest support), matching SWE-bench Lite.
