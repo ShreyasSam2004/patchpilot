@@ -81,11 +81,11 @@ async def load_mcp_tools(settings: Settings, registry: ToolRegistry) -> list[Mcp
 async def mcp_status(settings: Settings) -> dict[str, Any]:
     """Describe MCP configuration for the settings UI (without connecting)."""
     configs = load_config(settings.mcp_config_path)
-    try:
-        import mcp  # noqa: F401
+    import importlib.util
 
-        installed = True
-    except ImportError:
+    try:
+        installed = importlib.util.find_spec("mcp") is not None
+    except (ImportError, ValueError):
         installed = False
 
     return {

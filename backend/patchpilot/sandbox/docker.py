@@ -26,6 +26,7 @@ import json
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 from ..errors import SandboxError
 from ..logging_setup import get_logger
@@ -34,6 +35,31 @@ from .base import ExecResult, Sandbox, SandboxInfo, SandboxLimits, build_env
 log = get_logger(__name__)
 
 CONTAINER_WORKDIR = "/workspace"
+
+#: `docker info` takes ~2s and `docker image inspect` ~0.2s. The status and
+#: preflight endpoints call them on every page load, several times each. The
+#: daemon does not appear and disappear second to second, so a short cache
+#: turns a multi-second page into an instant one while staying honest about a
+#: daemon that genuinely went away.
+_PROBE_TTL_S = 10.0
+_probe_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str) -> Any | None:
+    entry = _probe_cache.get(key)
+    if entry is None or (time.monotonic() - entry[0]) > _PROBE_TTL_S:
+        return None
+    return entry[1]
+
+
+def _remember(key: str, value: Any) -> Any:
+    _probe_cache[key] = (time.monotonic(), value)
+    return value
+
+
+def invalidate_probe_cache() -> None:
+    """Forget cached daemon/image state — used after a pull or a build."""
+    _probe_cache.clear()
 
 
 async def _run_host(argv: list[str], timeout: int = 60) -> tuple[int, str, str]:
@@ -64,25 +90,33 @@ async def image_present(image: str) -> bool:
     it first and fail with a confusing error. Checking up front lets us say
     exactly what to build.
     """
+    cached = _cached(f"image:{image}")
+    if cached is not None:
+        return bool(cached)
     code, out, _ = await _run_host(
         ["docker", "image", "inspect", image, "--format", "{{.Id}}"], timeout=30
     )
-    return code == 0 and bool(out.strip())
+    return bool(_remember(f"image:{image}", code == 0 and bool(out.strip())))
 
 
 async def docker_available() -> tuple[bool, str]:
     """Check that the Docker CLI exists *and* the daemon answers."""
+    cached = _cached("daemon")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
     if shutil.which("docker") is None:
-        return False, "docker CLI not found on PATH"
+        return _remember("daemon", (False, "docker CLI not found on PATH"))  # type: ignore[return-value]
     code, out, err = await _run_host(["docker", "info", "--format", "{{json .}}"], timeout=30)
     if code != 0:
         detail = (err or out).strip()
-        return False, detail.splitlines()[-1] if detail else "daemon unreachable"
+        reason = detail.splitlines()[-1] if detail else "daemon unreachable"
+        return _remember("daemon", (False, reason))  # type: ignore[return-value]
     try:
         info = json.loads(out)
-        return True, f"{info.get('ServerVersion', '?')} ({info.get('OSType', '?')})"
+        version = f"{info.get('ServerVersion', '?')} ({info.get('OSType', '?')})"
     except json.JSONDecodeError:
-        return True, "daemon reachable"
+        version = "daemon reachable"
+    return _remember("daemon", (True, version))  # type: ignore[return-value]
 
 
 class DockerSandbox(Sandbox):
@@ -123,6 +157,7 @@ class DockerSandbox(Sandbox):
                     f"could not pull the sandbox image {self.image!r}: "
                     f"{(err or out).strip()[-400:]}"
                 )
+            invalidate_probe_cache()
 
         if not await image_present(self.image):
             raise SandboxError(

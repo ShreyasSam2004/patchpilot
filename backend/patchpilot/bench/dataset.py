@@ -188,9 +188,18 @@ def _load_huggingface(dataset: str, split: str) -> list[dict[str, Any]]:
 
 
 def dataset_available() -> tuple[bool, str]:
-    """Whether the dataset dependency is installed."""
+    """Whether the dataset dependency is installed.
+
+    Uses ``find_spec`` rather than importing: ``import datasets`` pulls in
+    pyarrow and pandas and costs ~4 seconds, which is absurd for a yes/no
+    answer that every page load asks for.
+    """
+    import importlib.util
+
     try:
-        import datasets  # noqa: F401
-    except ImportError:
+        found = importlib.util.find_spec("datasets") is not None
+    except (ImportError, ValueError):
+        found = False
+    if not found:
         return False, "the 'datasets' package is not installed (pip install -e '.[swebench]')"
     return True, "datasets package available"

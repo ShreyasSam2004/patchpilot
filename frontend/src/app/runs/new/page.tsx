@@ -62,14 +62,39 @@ export default function NewRunPage() {
   const set = (key: keyof typeof form, value: string) =>
     setForm((prev) => ({ ...prev, [key]: value }));
 
+  /** True while the issue box still holds text a fixture put there. */
+  const issueIsFixturePrefill = (text: string) =>
+    fixtures.some((f) => f.issue === text);
+
+  const chooseSource = (next: Source) => {
+    setSource(next);
+    setForm((prev) => {
+      if (next === "fixture") return prev;
+      // Leaving the fixture tab: drop the prefilled issue and test command so
+      // the user gets an empty box, but keep anything they actually wrote.
+      return {
+        ...prev,
+        issue: issueIsFixturePrefill(prev.issue) ? "" : prev.issue,
+        test_command: fixtures.some((f) => f.test_command === prev.test_command)
+          ? ""
+          : prev.test_command,
+      };
+    });
+  };
+
   const chooseFixture = (id: string) => {
     const fixture = fixtures.find((f) => f.id === id);
-    setForm((prev) => ({
-      ...prev,
-      fixture: id,
-      issue: fixture?.issue ?? prev.issue,
-      test_command: fixture?.test_command ?? "",
-    }));
+    if (!fixture) return;
+    setForm((prev) => {
+      // Never clobber an issue the user wrote themselves.
+      const keepIssue = prev.issue.trim() !== "" && !issueIsFixturePrefill(prev.issue);
+      return {
+        ...prev,
+        fixture: id,
+        issue: keepIssue ? prev.issue : fixture.issue,
+        test_command: keepIssue ? prev.test_command : fixture.test_command,
+      };
+    });
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -145,7 +170,7 @@ export default function NewRunPage() {
                 <button
                   key={id}
                   type="button"
-                  onClick={() => setSource(id)}
+                  onClick={() => chooseSource(id)}
                   className={`focus-ring flex-1 rounded px-3 py-1.5 text-[12px] font-medium transition-colors ${
                     source === id
                       ? "bg-[var(--bg-panel)] text-[var(--text)] shadow-sm"
