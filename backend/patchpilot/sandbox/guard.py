@@ -10,7 +10,7 @@ shell.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 #: Executables that are never allowed, regardless of arguments.
 BLOCKED_EXECUTABLES: frozenset[str] = frozenset(
@@ -118,6 +118,15 @@ SHELL_OPERATOR_TOKENS: frozenset[str] = frozenset(
 )
 
 
+#: Trailing shell noise that exists only to shape output, and that the sandbox
+#: already does: stderr is captured either way, and stdout is truncated to
+#: ``max_output_bytes``. Dropping these tokens changes nothing about what runs.
+_REDIRECT_NOISE: frozenset[str] = frozenset({"2>&1", "2>/dev/null", ">/dev/null", "1>/dev/null"})
+
+#: Pagers whose only effect is to shorten output we already cap.
+_PAGERS: frozenset[str] = frozenset({"head", "tail", "cat"})
+
+
 @dataclass(slots=True)
 class GuardVerdict:
     allowed: bool
@@ -125,6 +134,77 @@ class GuardVerdict:
 
     def __bool__(self) -> bool:
         return self.allowed
+
+
+@dataclass(slots=True)
+class Sanitized:
+    """An argv with inert shell decoration removed."""
+
+    argv: list[str]
+    cwd: str | None = None
+    """Directory extracted from a leading ``cd <dir> &&``, if there was one."""
+    notes: list[str] = field(default_factory=list)
+    """Human-readable description of what was dropped, shown to the agent."""
+
+
+def sanitize_command(argv: list[str]) -> Sanitized:
+    """Strip shell decoration that has no effect here, keeping the real command.
+
+    Commands never reach a shell, so `cmd 2>&1 | head -20` arrives as literal
+    trailing arguments that would confuse the program being run, and the guard
+    refuses it. That refusal is correct but expensive: in the first SWE-bench
+    batch 33 of 45 tool failures were refusals of this kind, each costing a
+    whole iteration to discover and another to redo.
+
+    Three of those forms carry no meaning without a shell and are simply
+    removed:
+
+    * ``cd <dir> && <command>``  -> the command, with ``cwd`` set to ``<dir>``
+    * ``... 2>&1`` / ``... >/dev/null``  -> stderr and stdout are captured anyway
+    * ``... | head -20``  -> output is already truncated to a byte cap
+
+    Anything else -- a real pipeline into `grep`, a chain of two commands with
+    ``;`` -- is left untouched for :func:`check_command` to refuse, because
+    honouring it would mean running a shell.
+    """
+    argv = list(argv)
+    notes: list[str] = []
+    cwd: str | None = None
+
+    if len(argv) >= 4 and argv[0] == "cd" and argv[2] == "&&":
+        cwd, argv = argv[1], argv[3:]
+        notes.append(f"ran it in {cwd} instead of using `cd`")
+
+    # Drop trailing pager pipes, innermost last: `x | head -5 | tail -2`.
+    while True:
+        if len(argv) >= 2 and argv[-1] in _REDIRECT_NOISE:
+            argv.pop()
+            notes.append("dropped a redirect (both streams are captured for you)")
+            continue
+        cut = _pager_start(argv)
+        if cut is not None:
+            argv = argv[:cut]
+            notes.append("dropped a pager (output is truncated for you already)")
+            continue
+        break
+
+    return Sanitized(argv=argv, cwd=cwd, notes=notes)
+
+
+def _pager_start(argv: list[str]) -> int | None:
+    """Index of a trailing ``| head -n`` group, or None if there is not one."""
+    for index in range(len(argv) - 1, 0, -1):
+        if argv[index] != "|":
+            continue
+        tail = argv[index + 1 :]
+        if not tail or _basename(tail[0]) not in _PAGERS:
+            return None
+        # Only a pager and its numeric flags may follow, else it is a real pipeline.
+        for token in tail[1:]:
+            if not re.fullmatch(r"-\d+|-[nc]|\d+", token):
+                return None
+        return index if index > 0 else None
+    return None
 
 
 def _basename(executable: str) -> str:

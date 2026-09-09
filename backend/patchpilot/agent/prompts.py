@@ -42,6 +42,13 @@ suspected cause, the evidence, the files involved, the proposed fix, and the \
 exact test command that will validate it. If evidence later contradicts it, \
 record a new one with supersedes_previous=true.
 
+Do this as soon as you have a *plausible* cause and a *likely* location. You are \
+not required to be certain, and you must not wait to become certain: certainty \
+comes from editing the code and watching the tests, not from reading more of it. \
+A candidate patch that turns out to be wrong is far more useful than a perfect \
+diagnosis you never applied — the wrong patch teaches you something, and you can \
+revise it. A run that ends with no patch scores nothing at all.
+
 **D. PATCH** — Make the smallest change that fixes the root cause.
 - Fix the cause, not the symptom. Do not paper over an exception where it \
 surfaces if it originates elsewhere.
@@ -67,8 +74,11 @@ Read the actual assertion and the traceback. Do not guess at a new patch \
 without reading why the last one failed.
 
 **G. STOP** — Call `finish`:
-- with resolved=true only after a test run has genuinely passed and your diff \
-contains the fix;
+- with resolved=true only after a `run_tests` call reported the suite green \
+*and* your diff contains the fix. A pass seen through `run_command` does not \
+count: only `run_tests` is recorded as evidence, so a pass observed any other \
+way is reported as unverified. If the project's runner cannot be driven through \
+`run_tests`, say so in your summary rather than claiming a pass;
 - with resolved=false when you are confident you cannot fix it — explain what \
 you established and what blocked you.
 Never claim success you have not observed. An honest failure is more useful \
@@ -78,6 +88,15 @@ than a false success.
 
 - One focused step at a time. Prefer a few well-chosen tool calls per turn.
 - Never invent file paths or contents. Read before you edit.
+- The environment is already set up, and the section below says what it is. \
+Do not spend turns hunting for an interpreter, a virtualenv, conda, pytest \
+or a missing package: that search has already been done for you, it costs \
+several turns, and nothing can be installed anyway because the sandbox has \
+no network. If a command fails for what looks like an environment reason, \
+re-read that section and use exactly what it names.
+- Commands do not go through a shell, so `;`, `&&` and `|` are refused. \
+Issue one command per call, pass `cwd` instead of using `cd`, and do not \
+append `| head` or `2>&1`: output is captured and truncated for you already.
 - If a patch does not apply, re-read the exact lines — your view is stale.
 - Keep your visible messages to one or two short sentences describing what you \
 are doing and why. Detailed reasoning belongs in `record_hypothesis`, not in \
@@ -94,6 +113,7 @@ def build_system_prompt(
     base_commit: str | None = None,
     hints: str | None = None,
     extra_guidance: str | None = None,
+    environment: str | None = None,
 ) -> str:
     """Assemble the full system prompt for a run."""
     sections = [SYSTEM_PROMPT, "\n# This task\n"]
@@ -106,6 +126,10 @@ def build_system_prompt(
         else "Default test command: not specified — discover the project's test runner "
         "(look for pytest.ini, tox.ini, setup.cfg, pyproject.toml or package.json)."
     )
+    if environment:
+        # Before the issue on purpose. The agent reads this first, and the whole
+        # point is that it never starts hunting for an interpreter at all.
+        sections.append(f"\n## Environment\n\n{environment.strip()}\n")
     sections.append(f"\n## Issue\n\n{issue.strip()}\n")
     if hints:
         sections.append(f"## Additional context\n\n{hints.strip()}\n")
@@ -184,4 +208,48 @@ def failure_classification_hint(outcome_description: str) -> str:
         f"The test run reported: {outcome_description}. Before changing anything else, "
         f"classify this failure as one of [{classes}] and say which. Then act on that "
         "classification."
+    )
+
+
+def no_patch_yet_message(
+    *, pressure: str, budget_line: str, candidate: str | None, learned: str
+) -> str:
+    """Injected when a run is burning budget without having edited anything.
+
+    Distinct from the anti-loop recovery message, which addresses *repetition*.
+    This addresses *paralysis*: every action is new and individually reasonable,
+    and yet the working tree is untouched with most of the budget gone. Six of
+    the fifteen runs in the first benchmark batch ended exactly that way, and
+    the loop detector had nothing to say about any of them.
+    """
+    where = (
+        f"The last file you read was `{candidate}`; that is the obvious place to start."
+        if candidate
+        else "You have not read a source file yet. Localise first, in one or two calls."
+    )
+    if pressure == "urgent":
+        head = (
+            "MOST OF YOUR BUDGET IS GONE AND YOU HAVE NOT CHANGED ANY CODE. "
+            "A run that ends with no patch scores zero however good its analysis. "
+            "Make your best candidate edit on this turn."
+        )
+        tail = (
+            "Do not read another file first. Apply the smallest change consistent with "
+            "what you already know, then run the test that covers it. If the change is "
+            "wrong you will have learned more than another read could have told you."
+        )
+    else:
+        head = (
+            "You are about halfway through your budget and have not changed any code "
+            "yet. Investigation is not the deliverable; a patch is."
+        )
+        tail = (
+            "Commit to the most plausible root cause now: record_hypothesis, then the "
+            "minimal edit, then the test that covers it. Revise from the result rather "
+            "than trying to become certain first."
+        )
+    return (
+        f"{head}\n\n{where}\n\n"
+        f"Budget: {budget_line}.\n\n"
+        f"What this run has established:\n{learned}\n\n{tail}"
     )

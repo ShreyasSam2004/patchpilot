@@ -40,6 +40,10 @@ from ..tools.registry import ToolRegistry
 from ..workspace.workspace import Workspace
 from .antiloop import LoopDetector
 from .budget import Budget, BudgetTracker
+from .environment import RuntimeEnvironment
+from .environment import apply_to_sandbox as apply_environment
+from .environment import probe as probe_environment
+from .progress import ProgressTracker
 from .prompts import (
     budget_warning_message,
     build_system_prompt,
@@ -47,6 +51,7 @@ from .prompts import (
     failure_classification_hint,
     final_turn_message,
     initial_user_message,
+    no_patch_yet_message,
     recovery_message,
 )
 from .result import (
@@ -168,6 +173,10 @@ class AgentOrchestrator:
         self._cancelled = False
         self._wrapup_used = False
         self._pending_directives: list[str] = []
+        self.environment = RuntimeEnvironment()
+        self.progress = ProgressTracker()
+        self.iteration_extension_fraction = 0.25
+        """Size of the one-off extension, as a fraction of the configured budget."""
 
     # ------------------------------------------------------------------ state
     async def _set_state(self, state: RunState) -> None:
@@ -214,6 +223,17 @@ class AgentOrchestrator:
             isolation=self.sandbox.info().isolation,
         )
 
+        # Probe the interpreter before anything else. 39% of the tool calls in
+        # the first SWE-bench batch were spent rediscovering it per task; doing
+        # it once here, off-budget, is the single largest saving available.
+        self.environment = await probe_environment(self.sandbox, self.workspace.root)
+        await apply_environment(self.sandbox, self.environment)
+        if not self.environment.usable:
+            await self.emitter.warning(
+                "no working interpreter found; commands may fail for environment reasons",
+                **self.environment.summary(),
+            )
+
         if self.task.test_command is None:
             discovered, cwd = await self._discover_test_command()
             self.tool_state["test_command"] = discovered
@@ -223,6 +243,20 @@ class AgentOrchestrator:
                 test_command=discovered,
                 test_cwd=cwd,
             )
+        elif self.environment.probed and not self.environment.has_pytest:
+            # A supplied command is usually `python -m pytest`, which cannot work
+            # when the project's interpreter has no pytest. Fall back to the
+            # project's own runner rather than handing over a command we already
+            # know fails -- that lie cost whole trajectories.
+            discovered, cwd = await self._discover_test_command()
+            if discovered != self.task.test_command:
+                self.tool_state["test_command"] = discovered
+                self.tool_state["test_cwd"] = cwd
+                await self.emitter.warning(
+                    "supplied test command needs pytest, which this interpreter lacks",
+                    supplied=self.task.test_command,
+                    test_command=discovered,
+                )
 
         await self._set_state(RunState.ANALYZING)
         await self.emitter.issue_analyzed(
@@ -272,6 +306,7 @@ class AgentOrchestrator:
             base_commit=self.task.base_commit,
             hints=self.task.hints,
             extra_guidance=self.task.extra_guidance,
+            environment=self.environment.describe(),
         )
         tool_specs = [spec.to_dict() for spec in self.registry.specs()]
 
@@ -281,6 +316,15 @@ class AgentOrchestrator:
                 return
 
             limit = self.budget.exceeded()
+            if limit == "max_iterations":
+                extra = self._extension_iterations()
+                if extra and self.budget.grant_iteration_extension(extra):
+                    await self.emitter.warning(
+                        "granting extra iterations to a run that is still converging",
+                        extra_iterations=extra,
+                        snapshot=self.budget.snapshot(),
+                    )
+                    limit = self.budget.exceeded()
             if limit:
                 await self.emitter.budget_exceeded(limit=limit, snapshot=self.budget.snapshot())
                 # The budget bounds how much *work* the agent may do, not its
@@ -318,6 +362,7 @@ class AgentOrchestrator:
                 await self.emitter.iteration_completed(iteration, tool_calls=0, mutated=False)
                 continue
 
+            files_before = len(self.progress.files_seen)
             mutated = await self._execute_tool_calls(response.tool_calls, iteration)
 
             if self.tool_state.get("finish_requested"):
@@ -325,7 +370,11 @@ class AgentOrchestrator:
                 return
 
             self.detector.end_iteration(mutated=mutated)
+            self.progress.end_iteration(
+                mutated=mutated, saw_new_file=len(self.progress.files_seen) > files_before
+            )
             await self._check_for_loops()
+            self._maybe_push_toward_a_patch()
 
             self.transcript.add_user(
                 continuation_message(
@@ -436,6 +485,9 @@ class AgentOrchestrator:
             self.detector.record_action(
                 call.name, call.arguments, mutating=is_mutating, succeeded=tool_result.ok
             )
+            self.progress.record_tool(
+                call.name, call.arguments, iteration, succeeded=tool_result.ok
+            )
 
             if is_mutating and tool_result.ok:
                 mutated = True
@@ -518,7 +570,15 @@ class AgentOrchestrator:
             )
             self.result.test_runs.append(record)
             self.result.metrics.test_runs += 1
+            self.progress.record_test(iteration, green=record.green)
+            # Verification is only meaningful after the code changed. A suite
+            # that was green before the edit says nothing about the fix, and a
+            # later edit invalidates an earlier pass.
+            if record.green and self._files_modified:
+                self.result.metrics.verified_by_tests = True
+                self.tool_state["tests_stale"] = False
             if not record.green:
+                self.result.metrics.verified_by_tests = False
                 self._pending_directives.append(
                     failure_classification_hint(result.summary)
                 )
@@ -545,6 +605,10 @@ class AgentOrchestrator:
                 fallback = [arguments["path"]] if "path" in arguments else []
                 for path in data.get("files", []) or fallback:
                     self._files_modified.add(str(path))
+                # Editing after a green run means that green no longer covers
+                # the working tree; the agent must re-run to claim success.
+                self.result.metrics.verified_by_tests = False
+                self.tool_state["tests_stale"] = True
 
     def _last_test_summary(self) -> str | None:
         record = self.result.last_test_run
@@ -600,6 +664,59 @@ class AgentOrchestrator:
         while self._pending_directives:
             self.transcript.add_user(self._pending_directives.pop(0))
 
+    def _extension_iterations(self) -> int:
+        """How many extra iterations this run has earned, if any.
+
+        Deliberately narrow. Extra budget only helps a run that already has a
+        patch and is learning from test results -- the shape of the two
+        instances the harness resolved while PatchPilot had recorded them as
+        TIMEOUT and FAILED. A run with no patch, or one whose tests already pass,
+        or one that has stopped testing, gains nothing from more turns, and this
+        must not become a way of papering over the paralysis the rest of these
+        changes address.
+        """
+        if not self.progress.has_edit:
+            return 0
+        if self.result.metrics.verified_by_tests:
+            return 0  # already green; the wrap-up turn is enough to report it
+        if not self.result.test_runs:
+            return 0  # never tested: more exploration is not the problem
+        last_tested_at = self.result.test_runs[-1].iteration
+        if self.budget.iterations - last_tested_at > 3:
+            return 0  # no longer in the patch-test-observe cycle
+        base = self.budget.budget.max_iterations
+        return max(1, round(base * self.iteration_extension_fraction))
+
+    def _maybe_push_toward_a_patch(self) -> None:
+        """Escalate toward an edit when a run is all investigation and no patch.
+
+        Six of fifteen benchmark runs reached the iteration cap without editing
+        anything, and the anti-loop detector had nothing to say about it -- none
+        of them was repeating an action, they were each exploring something new
+        every turn. Repetition and paralysis are different failures, so this
+        watches a different signal: budget consumed with no edit at all.
+
+        It advises; it never edits. Forcing a change at a fixed iteration would
+        trade six no-patch runs for six random-patch runs.
+        """
+        if self._pending_directives:
+            # The loop detector already has something to say this iteration.
+            # Two long directives at once buries both.
+            return
+        pressure = self.progress.pressure(
+            self.budget.iterations, self.budget.budget.max_iterations
+        )
+        if not self.progress.should_warn(pressure):
+            return
+        self._pending_directives.append(
+            no_patch_yet_message(
+                pressure=str(pressure),
+                budget_line=self.budget.describe_remaining(),
+                candidate=self.progress.best_candidate(),
+                learned=self._what_we_know(),
+            )
+        )
+
     def _maybe_warn_about_budget(self) -> None:
         remaining = self.budget.budget.max_iterations - self.budget.iterations
         if remaining == 3:
@@ -611,6 +728,20 @@ class AgentOrchestrator:
     async def _handle_finish(self) -> None:
         resolved = bool(self.tool_state.get("finish_resolved"))
         summary = str(self.tool_state.get("finish_summary") or "")
+
+        # The agent's belief and the evidence for it are recorded separately.
+        # In the first benchmark batch the agent called 5 instances RESOLVED and
+        # the harness confirmed 2 -- while finding 2 more among the ones it had
+        # given up on. Its opinion is a signal, not a verdict, so we keep the
+        # claim and note whether a `run_tests` call ever actually went green
+        # against the current working tree.
+        self.result.agent_claimed_resolved = resolved
+        if resolved and not self.result.metrics.verified_by_tests:
+            await self.emitter.warning(
+                "agent reported success without an observed green test run",
+                verified_by_tests=False,
+                test_runs=self.result.metrics.test_runs,
+            )
         raw_class = self.tool_state.get("finish_failure_class")
         if raw_class:
             try:
@@ -662,6 +793,14 @@ class AgentOrchestrator:
             cached_tokens=usage.cache_read_tokens,
             cost_usd=usage.cost_usd,
             loop_signals=self.result.metrics.loop_signals,
+            # Progress diagnostics. This constructor replaces the metrics object
+            # wholesale, so anything not carried across here is silently lost.
+            time_to_first_edit=self.progress.first_edit,
+            time_to_first_file_read=self.progress.first_file_read,
+            time_to_first_hypothesis=self.progress.first_hypothesis,
+            time_to_first_test=self.progress.first_test_run,
+            time_to_first_green_test=self.progress.first_green_test,
+            verified_by_tests=self.result.metrics.verified_by_tests,
         )
 
         if stat is not None and self.result.final_patch.strip():

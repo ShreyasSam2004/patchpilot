@@ -73,6 +73,8 @@ class LoopDetector:
     """How many identical actions before it counts as a loop."""
     stall_iterations: int = 4
     """Iterations with no mutating action before we call it a stall."""
+    stall_escalate_every: int = 3
+    """Re-arm the stall signal every N further iterations without an edit."""
 
     actions: Counter[str] = field(default_factory=Counter)
     action_labels: dict[str, str] = field(default_factory=dict)
@@ -182,10 +184,19 @@ class LoopDetector:
                 )
             )
 
-        if self.iterations_since_mutation >= self.stall_iterations:
+        # Escalating, not one-shot. `check()` suppresses a kind it has already
+        # reported, so a constant kind meant the single most important directive
+        # in the system was delivered once at iteration 4 and never again -- six
+        # runs then explored for eighteen further iterations in silence. Bucketing
+        # the count into the kind re-arms it as the stall gets worse, at 4, 7,
+        # 10 ... rather than every iteration, which would be noise.
+        stalled_for = self.iterations_since_mutation
+        if stalled_for >= self.stall_iterations and (
+            stalled_for - self.stall_iterations
+        ) % self.stall_escalate_every == 0:
             found.append(
                 LoopSignal(
-                    kind="stalled",
+                    kind=f"stalled:{stalled_for}",
                     detail=f"{self.iterations_since_mutation} iterations with no code change",
                     directive=(
                         f"{self.iterations_since_mutation} iterations have passed without a single "

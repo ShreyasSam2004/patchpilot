@@ -235,7 +235,7 @@ class DockerSandbox(Sandbox):
         workdir = self._container_path(cwd)
 
         docker_argv = ["docker", "exec", "--workdir", workdir]
-        for key, value in (env or {}).items():
+        for key, value in {**self.env_overlay, **(env or {})}.items():
             docker_argv += ["--env", f"{key}={value}"]
         docker_argv += [self.container_name, *argv]
 

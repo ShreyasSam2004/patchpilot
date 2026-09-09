@@ -536,8 +536,13 @@ async def test_stall_detection_when_nothing_is_edited(settings, tmp_path) -> Non
         sinks=[sink],
     )
 
-    kinds = [e.payload.get("kind") for e in sink.of_type(EventType.LOOP_DETECTED)]
-    assert "stalled" in kinds
+    kinds = [str(e.payload.get("kind")) for e in sink.of_type(EventType.LOOP_DETECTED)]
+    stalls = [k for k in kinds if k.startswith("stalled:")]
+    assert stalls, f"the stall rule never fired; saw {kinds}"
+    # It must keep firing as the stall worsens. A single one-shot signal meant
+    # the most important directive in the system was delivered once, at
+    # iteration 4, and then never again while the run explored to the cap.
+    assert len(stalls) >= 2, f"stall signal did not escalate: {stalls}"
 
 
 # ---------------------------------------------------------- error resilience

@@ -14,7 +14,7 @@ import sys
 from pydantic import BaseModel, Field, field_validator
 
 from ...errors import ToolError
-from ...sandbox.guard import check_command
+from ...sandbox.guard import check_command, sanitize_command
 from ..base import Tool, ToolContext, ToolResult
 from .testparse import extract_failure_excerpt, parse_test_output
 
@@ -90,8 +90,9 @@ class RunTestsTool(Tool[RunTestsArgs]):
 
     async def execute(self, ctx: ToolContext, args: RunTestsArgs) -> ToolResult:
         default = ctx.state.get("test_command") or "python -m pytest -q"
-        argv = _tokenize(args.command or default)
-        cwd = args.cwd if args.cwd is not None else ctx.state.get("test_cwd")
+        cleaned = sanitize_command(_tokenize(args.command or default))
+        argv = cleaned.argv
+        cwd = args.cwd if args.cwd is not None else (cleaned.cwd or ctx.state.get("test_cwd"))
 
         verdict = check_command(argv)
         if not verdict:
@@ -184,7 +185,9 @@ class RunCommandTool(Tool[RunCommandArgs]):
     timeout_s = 900.0
 
     async def execute(self, ctx: ToolContext, args: RunCommandArgs) -> ToolResult:
-        argv = _tokenize(args.command)
+        cleaned = sanitize_command(_tokenize(args.command))
+        argv = cleaned.argv
+        cwd = args.cwd if args.cwd is not None else cleaned.cwd
         verdict = check_command(argv)
         if not verdict:
             raise ToolError(f"refused: {verdict.reason}", code="command_refused")
@@ -193,7 +196,7 @@ class RunCommandTool(Tool[RunCommandArgs]):
             args.timeout_s or ctx.settings.command_timeout_s,
             ctx.settings.command_timeout_s,
         )
-        result = await ctx.sandbox.exec(argv, cwd=args.cwd, timeout_s=timeout)
+        result = await ctx.sandbox.exec(argv, cwd=cwd, timeout_s=timeout)
 
         budget = ctx.settings.max_tool_output_bytes
         output = result.combined_output
@@ -202,9 +205,12 @@ class RunCommandTool(Tool[RunCommandArgs]):
             output = output[:budget] + "\n...[output truncated]"
 
         status = "TIMED OUT" if result.timed_out else f"exit={result.exit_code}"
+        # Say what was rewritten, so the agent learns the calling convention
+        # rather than rediscovering it one refusal at a time.
+        note = ("\nnote: " + "; ".join(cleaned.notes)) if cleaned.notes else ""
         return ToolResult(
             ok=True,
-            content=f"$ {shlex.join(argv)}\n{status} ({result.duration_ms}ms)\n\n{output}",
+            content=f"$ {shlex.join(argv)}\n{status} ({result.duration_ms}ms){note}\n\n{output}",
             summary=f"ran {argv[0]} ({status})",
             truncated=truncated or result.truncated,
             data={

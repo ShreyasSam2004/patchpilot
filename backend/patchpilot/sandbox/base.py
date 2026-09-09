@@ -153,6 +153,17 @@ class Sandbox(ABC):
     def __init__(self, root: Path, limits: SandboxLimits | None = None) -> None:
         self.root = root.resolve()
         self.limits = limits or SandboxLimits()
+        self.env_overlay: dict[str, str] = {}
+        """Environment applied to every command in this sandbox.
+
+        Set once, after probing, by :mod:`patchpilot.agent.environment`. Its
+        purpose is to put the project's real interpreter on ``PATH`` so the
+        agent does not have to rediscover it: in a SWE-bench image the working
+        Python lives in a conda env the image never activates, and bare
+        ``python`` is missing the project's dependencies entirely.
+
+        A caller's explicit ``env=`` still wins, so a tool can override it.
+        """
 
     @abstractmethod
     async def exec(
@@ -174,6 +185,16 @@ class Sandbox(ABC):
     @abstractmethod
     def info(self) -> SandboxInfo:
         """Describe the isolation actually in force."""
+
+    @property
+    def path_separator(self) -> str:
+        """Separator for PATH entries *inside* the sandbox.
+
+        Not the host's: a Docker sandbox is Linux however it was launched, so
+        deriving this from ``os.pathsep`` would corrupt PATH when the API runs
+        on Windows.
+        """
+        return ":"
 
     def resolve_cwd(self, cwd: str | None) -> Path:
         """Resolve a working directory, refusing anything outside the root."""

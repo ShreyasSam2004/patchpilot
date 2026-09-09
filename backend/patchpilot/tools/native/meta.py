@@ -134,6 +134,17 @@ class FinishTool(Tool[FinishArgs]):
                     f"({outcome.describe()}). Fix the failures or finish with resolved=false.",
                     code="tests_failing",
                 )
+            if ctx.state.get("tests_stale"):
+                # The green run above happened before the most recent edit, so
+                # it says nothing about the tree being submitted. Without this
+                # the guard could be satisfied by a pass that predates the code
+                # it is supposed to be validating.
+                return ToolResult.failure(
+                    "Cannot finish as resolved: you edited the code after your last test "
+                    "run, so that green result no longer covers the current diff. "
+                    "Run the tests again.",
+                    code="tests_stale",
+                )
 
         ctx.state["finish_requested"] = True
         ctx.state["finish_resolved"] = bool(args.resolved)

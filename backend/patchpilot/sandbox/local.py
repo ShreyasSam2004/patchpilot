@@ -121,6 +121,10 @@ class LocalSandbox(Sandbox):
 
         return argv
 
+    @property
+    def path_separator(self) -> str:
+        return os.pathsep
+
     async def exec(
         self,
         argv: list[str],
@@ -136,7 +140,7 @@ class LocalSandbox(Sandbox):
         workdir = self.resolve_cwd(cwd)
         workdir.mkdir(parents=True, exist_ok=True)
         timeout = timeout_s or self.limits.timeout_s
-        process_env = build_env(env)
+        process_env = build_env({**self.env_overlay, **(env or {})})
         process_env["PWD"] = str(workdir)
 
         kwargs: dict[str, object] = {}

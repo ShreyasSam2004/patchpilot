@@ -482,6 +482,22 @@ def _aggregate(tasks: list[BenchmarkTask], benchmark: BenchmarkRun) -> dict[str,
     agent_resolved = sum(1 for t in tasks if t.agent_status == str(RunState.RESOLVED))
     with_patch = sum(1 for t in tasks if (t.model_patch or "").strip())
 
+    # Time-to-first-edit is the diagnostic for the failure mode that dominated
+    # the first batch: six runs that used their whole budget without ever
+    # editing. `None` means never, so those are counted rather than averaged --
+    # folding them into a mean would hide exactly the thing worth seeing.
+    first_edits = [
+        float(m["time_to_first_edit"])
+        for m in metrics
+        if m.get("time_to_first_edit") is not None
+    ]
+    never_edited = sum(1 for m in metrics if m.get("time_to_first_edit") is None)
+    unverified_claims = sum(
+        1
+        for t, m in ((t, t.metrics or {}) for t in tasks)
+        if t.agent_status == str(RunState.RESOLVED) and not m.get("verified_by_tests")
+    )
+
     return {
         "total_runtime_s": round(sum(durations), 1) if durations else 0.0,
         "avg_runtime_s": mean(durations),
@@ -497,7 +513,10 @@ def _aggregate(tasks: list[BenchmarkTask], benchmark: BenchmarkRun) -> dict[str,
             else None
         ),
         "tasks_with_patch": with_patch,
+        "avg_time_to_first_edit": mean(first_edits),
+        "tasks_that_never_edited": never_edited,
         "agent_reported_resolved": agent_resolved,
+        "agent_resolved_without_green_tests": unverified_claims,
         "evaluated": benchmark.evaluated,
         # Present only when the official evaluator actually ran.
         "resolve_rate": benchmark.resolve_rate,

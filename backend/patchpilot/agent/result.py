@@ -128,6 +128,24 @@ class RunMetrics:
     cost_usd: float | None = None
     loop_signals: int = 0
 
+    # --- progress diagnostics -------------------------------------------------
+    # Recorded so trajectories can be compared across runs. The batch that
+    # motivated these had six runs reach the iteration cap without ever editing,
+    # and nothing in the metrics said so: `patch_attempts` was 0, which reads
+    # identically to "tried once and the patch failed to apply".
+    time_to_first_edit: int | None = None
+    """Iteration of the first successful edit. None means the run never edited."""
+    time_to_first_file_read: int | None = None
+    time_to_first_hypothesis: int | None = None
+    time_to_first_test: int | None = None
+    time_to_first_green_test: int | None = None
+    verified_by_tests: bool = False
+    """True when a `run_tests` call was observed green after the last edit.
+
+    This is the agent's *evidence*, not its opinion, and the two disagreed on 4
+    of 9 graded instances in the first batch.
+    """
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "iterations": self.iterations,
@@ -144,6 +162,12 @@ class RunMetrics:
             "cached_tokens": self.cached_tokens,
             "cost_usd": self.cost_usd,
             "loop_signals": self.loop_signals,
+            "time_to_first_edit": self.time_to_first_edit,
+            "time_to_first_file_read": self.time_to_first_file_read,
+            "time_to_first_hypothesis": self.time_to_first_hypothesis,
+            "time_to_first_test": self.time_to_first_test,
+            "time_to_first_green_test": self.time_to_first_green_test,
+            "verified_by_tests": self.verified_by_tests,
         }
 
 
@@ -158,6 +182,14 @@ class AgentResult:
     failure_class: FailureClass | None = None
     stop_reason: str = ""
     error: str | None = None
+    agent_claimed_resolved: bool = False
+    """What the agent asserted via `finish`, kept apart from the evidence.
+
+    `state` is what PatchPilot concluded and `metrics.verified_by_tests` is what
+    was actually observed; the official harness remains the only authority on
+    whether an instance is resolved. Keeping the three separate is what makes
+    the agent's calibration measurable instead of invisible.
+    """
 
     files_inspected: list[str] = field(default_factory=list)
     files_modified: list[str] = field(default_factory=list)

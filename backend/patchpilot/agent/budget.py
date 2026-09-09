@@ -49,6 +49,8 @@ class BudgetTracker:
     iterations: int = 0
     tool_calls: int = 0
     cost_usd: float = 0.0
+    extension_granted: int = 0
+    """Extra iterations awarded once, to a run that was still converging."""
 
     @property
     def elapsed_s(self) -> float:
@@ -67,6 +69,23 @@ class BudgetTracker:
     def record_cost(self, cost_usd: float | None) -> None:
         if cost_usd:
             self.cost_usd += cost_usd
+
+    def grant_iteration_extension(self, iterations: int) -> bool:
+        """Award extra iterations to a run that is mid patch-test-observe cycle.
+
+        Two instances in the first benchmark batch were graded RESOLVED by the
+        harness while PatchPilot recorded them as TIMEOUT or FAILED: they had a
+        working patch and were cut off before they could confirm it. Extending
+        a run that has a patch and is still learning from tests is cheap; the
+        cost and wall-clock ceilings are untouched, so this cannot run away, and
+        it is granted at most once so it cannot become a slow-motion infinite
+        loop.
+        """
+        if iterations <= 0 or self.extension_granted:
+            return False
+        self.budget.max_iterations += iterations
+        self.extension_granted = iterations
+        return True
 
     def exceeded(self) -> str | None:
         """Name of the first exhausted limit, or ``None`` while budget remains."""
@@ -90,6 +109,7 @@ class BudgetTracker:
             "max_runtime_s": self.budget.max_runtime_s,
             "cost_usd": round(self.cost_usd, 4),
             "max_cost_usd": self.budget.max_cost_usd,
+            "extension_granted": self.extension_granted,
         }
 
     def describe_remaining(self) -> str:
