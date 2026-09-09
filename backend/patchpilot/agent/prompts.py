@@ -47,7 +47,29 @@ not required to be certain, and you must not wait to become certain: certainty \
 comes from editing the code and watching the tests, not from reading more of it. \
 A candidate patch that turns out to be wrong is far more useful than a perfect \
 diagnosis you never applied — the wrong patch teaches you something, and you can \
-revise it. A run that ends with no patch scores nothing at all.
+revise it. A run that ends with no source change scores nothing at all.
+
+**THE COMMIT DECISION.** Once you can state all four of these, stop \
+investigating and edit:
+
+    ROOT CAUSE     — one sentence, causal, not a restatement of the symptom
+    TARGET         — the file and function you believe must change
+    MINIMAL REPAIR — the smallest edit that would make the behaviour correct
+    EXPECTED EFFECT— what will differ afterwards, and what must not
+
+From that point, further reading needs a reason of this shape: "I need to know \
+X, because X decides whether repair A or repair B is right." That is a real \
+reason. "I should understand this better" is not — it has no decision attached, \
+and it is how a run reaches its limit having changed nothing.
+
+If something genuinely blocks you, name the single missing fact and run the \
+smallest check that answers it. Then edit.
+
+**Reproducing is not repairing.** A reproduction tells you the bug is real; it \
+never tells you the fix is right, and re-running it with the source unchanged \
+cannot teach you anything new. Reproduce once to confirm the symptom, then work \
+from the code. Save the reproduction for *after* your edit, where it becomes the \
+check that your change did what you intended.
 
 **D. PATCH** — Make the smallest change that fixes the root cause.
 - Fix the cause, not the symptom. Do not paper over an exception where it \
@@ -65,15 +87,26 @@ there. A script written anywhere else lands in your submitted diff, and a diff \
 whose only content is a debug script counts as no fix at all. Writing one is \
 also not progress: the deliverable is a change to the project's own source.
 
-**E. VALIDATE** — Run the specific test that covers the bug first, then broaden \
-to the surrounding suite to catch regressions. A fix you have not run is not a \
-fix.
+**E. VALIDATE** — Cheapest informative check first, in this order:
+1. your reproduction — does the issue's own example behave correctly now?
+2. the specific test file covering the code you changed;
+3. the surrounding module's tests, for regressions;
+4. anything broader, only when you have a reason to suspect wider impact.
+A fix you have not run is not a fix. But a broad suite run costs a large slice \
+of your budget and usually tells you less than the reproduction does.
 
 The tests that will judge your work do not all exist in this checkout — some \
-are added afterwards from the issue's own expected behaviour. So a green suite \
-is necessary but not sufficient: also demonstrate, with a reproduction, that \
-the exact behaviour described in the issue now happens. Say what you observed \
-in your `finish` summary.
+are added afterwards from the issue's own expected behaviour. A green suite is \
+therefore necessary and *not sufficient*: it mostly proves you broke nothing. \
+Before finishing, ask yourself:
+
+- Did I fix the underlying behaviour, or only the exact example in the issue?
+- Would a nearby input — a different type, an empty value, the symmetric case — \
+also be handled?
+- Did I special-case the reported example rather than repair the logic?
+- Did I preserve existing semantics for everything else?
+
+Say what you observed in your `finish` summary.
 
 **F. OBSERVE** — When tests fail, classify the failure before acting:
 - ORIGINAL_BUG — your change did not address the real cause;
@@ -84,7 +117,18 @@ in your `finish` summary.
 Read the actual assertion and the traceback. Do not guess at a new patch \
 without reading why the last one failed.
 
-**G. STOP** — Call `finish`:
+A failing patch is a narrowed search, not a reset. Keep the file, the function \
+and the evidence you already have; change only the part of the hypothesis the \
+failure actually contradicts, and revise the edit. Do not go back to browsing \
+the repository — you already know where the bug lives.
+
+**G. STOP** — Before calling `finish`, run `git_diff` and read it. Compare what \
+it changes against the fix you believe you made. If the diff does not implement \
+your hypothesis — it is empty, it only touches scratch or debug code, or it does \
+something other than what you intended — you are not finished. Go and make the \
+change.
+
+Call `finish`:
 - with resolved=true only after a `run_tests` call reported the suite green \
 *and* your diff contains the fix. A pass seen through `run_command` does not \
 count: only `run_tests` is recorded as evidence, so a pass observed any other \
@@ -223,44 +267,94 @@ def failure_classification_hint(outcome_description: str) -> str:
 
 
 def no_patch_yet_message(
-    *, pressure: str, budget_line: str, candidate: str | None, learned: str
+    *,
+    pressure: str,
+    budget_line: str,
+    candidate: str | None,
+    learned: str,
+    reproductions: int = 0,
 ) -> str:
-    """Injected when a run is burning budget without having edited anything.
+    """Injected when a run is burning budget without a source edit.
 
     Distinct from the anti-loop recovery message, which addresses *repetition*.
     This addresses *paralysis*: every action is new and individually reasonable,
-    and yet the working tree is untouched with most of the budget gone. Six of
-    the fifteen runs in the first benchmark batch ended exactly that way, and
-    the loop detector had nothing to say about any of them.
+    and yet no implementation code has changed. Six of the fifteen runs in the
+    first benchmark batch ended exactly that way, and the loop detector had
+    nothing to say about any of them.
+
+    The reproduction variant is separate because the second pass identified the
+    mechanism: every empty-patch run rebuilt its reproduction instead of editing,
+    up to ten times, while every run that produced a patch reproduced only after
+    editing. Telling a run "you have not edited" when it feels busy reproducing
+    misses the point; naming the loop it is in does not.
     """
     where = (
-        f"The last file you read was `{candidate}`; that is the obvious place to start."
+        f"The last implementation file you read was `{candidate}` — that is where the "
+        "edit goes."
         if candidate
-        else "You have not read a source file yet. Localise first, in one or two calls."
+        else "You have not read an implementation file yet. Localise first, in one or "
+        "two calls, then edit."
     )
-    if pressure == "urgent":
+
+    if reproductions > 2 and pressure == "urgent":
         head = (
-            "MOST OF YOUR BUDGET IS GONE AND YOU HAVE NOT CHANGED ANY CODE. "
-            "A run that ends with no patch scores zero however good its analysis. "
-            "Make your best candidate edit on this turn."
+            f"You have reproduced this failure {reproductions} times without changing "
+            "any implementation code. The reproduction has told you everything it can: "
+            "running it again with the same source cannot produce a new fact."
+        )
+        tail = (
+            "Write down the smallest change that would make that observed behaviour "
+            "correct, and make it now. Then re-run the reproduction — this time it "
+            "will actually be testing something."
+        )
+    elif pressure == "urgent":
+        head = (
+            "MOST OF YOUR BUDGET IS GONE AND NO IMPLEMENTATION CODE HAS CHANGED. "
+            "A run that ends without a source change scores zero however good its "
+            "analysis. Make your best candidate edit on this turn."
         )
         tail = (
             "Do not read another file first. Apply the smallest change consistent with "
-            "what you already know, then run the test that covers it. If the change is "
-            "wrong you will have learned more than another read could have told you."
+            "what you already know, then check it. If the change is wrong you will have "
+            "learned more than another read could have told you."
         )
     else:
         head = (
-            "You are about halfway through your budget and have not changed any code "
-            "yet. Investigation is not the deliverable; a patch is."
+            "You have enough to attempt a repair and have not changed any implementation "
+            "code yet. Investigation is not the deliverable; a source change is."
         )
         tail = (
-            "Commit to the most plausible root cause now: record_hypothesis, then the "
-            "minimal edit, then the test that covers it. Revise from the result rather "
-            "than trying to become certain first."
+            "State the root cause, the target function, and the minimal repair — then "
+            "make it. Revise from the result rather than trying to become certain first. "
+            "If something specific blocks you, name that one fact and answer it in a "
+            "single call."
         )
     return (
         f"{head}\n\n{where}\n\n"
         f"Budget: {budget_line}.\n\n"
         f"What this run has established:\n{learned}\n\n{tail}"
+    )
+
+
+def low_information_message(*, target: str, has_patch: bool, learned: str) -> str:
+    """Injected when a target has been re-examined past the point of usefulness.
+
+    Successful runs looked at a given file once or twice; the empty-patch runs
+    reached five to seven. Re-reading is not a loop in the anti-loop sense — the
+    line ranges differ — but it cannot change the repair either.
+    """
+    nudge = (
+        "revise the patch you already have, guided by the last failure"
+        if has_patch
+        else "make the smallest source change your current explanation implies"
+    )
+    return (
+        f"You have examined `{target}` repeatedly and the last few looks have not "
+        "changed your plan. More of the same cannot: you either already know what to "
+        "do, or you are missing a fact that this file does not contain.\n\n"
+        f"What this run has established:\n{learned}\n\n"
+        "Answer one of these in a single sentence, then act on it:\n"
+        "1. The specific fact I still need is X, and it decides between repair A and "
+        "repair B — then run the one call that answers X.\n"
+        f"2. There is no such fact — then {nudge}."
     )

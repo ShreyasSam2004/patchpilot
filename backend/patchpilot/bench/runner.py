@@ -487,11 +487,22 @@ def _aggregate(tasks: list[BenchmarkTask], benchmark: BenchmarkRun) -> dict[str,
     # editing. `None` means never, so those are counted rather than averaged --
     # folding them into a mean would hide exactly the thing worth seeing.
     first_edits = [
-        float(m["time_to_first_edit"])
+        float(m["time_to_first_source_edit"])
         for m in metrics
-        if m.get("time_to_first_edit") is not None
+        if m.get("time_to_first_source_edit") is not None
     ]
-    never_edited = sum(1 for m in metrics if m.get("time_to_first_edit") is None)
+    never_edited = sum(1 for m in metrics if m.get("time_to_first_source_edit") is None)
+    # A patch that is only investigation debris is not a patch. Counted apart
+    # from `tasks_with_patch`, which asks merely whether the diff was non-empty.
+    meaningful = sum(1 for m in metrics if m.get("meaningful_patch"))
+    checked_behaviour = sum(
+        1 for m in metrics if m.get("time_to_first_behaviour_check") is not None
+    )
+    repro_before_edit = [
+        float(m.get("reproductions_before_edit") or 0)
+        for m in metrics
+        if m.get("time_to_first_source_edit") is None
+    ]
     unverified_claims = sum(
         1
         for t, m in ((t, t.metrics or {}) for t in tasks)
@@ -513,8 +524,11 @@ def _aggregate(tasks: list[BenchmarkTask], benchmark: BenchmarkRun) -> dict[str,
             else None
         ),
         "tasks_with_patch": with_patch,
-        "avg_time_to_first_edit": mean(first_edits),
-        "tasks_that_never_edited": never_edited,
+        "avg_time_to_first_source_edit": mean(first_edits),
+        "tasks_that_never_edited_source": never_edited,
+        "tasks_with_meaningful_patch": meaningful,
+        "tasks_that_checked_behaviour": checked_behaviour,
+        "avg_reproductions_before_giving_up": mean(repro_before_edit),
         "agent_reported_resolved": agent_resolved,
         "agent_resolved_without_green_tests": unverified_claims,
         "evaluated": benchmark.evaluated,

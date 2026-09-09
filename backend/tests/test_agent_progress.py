@@ -19,7 +19,9 @@ from patchpilot.agent.environment import (
     probe,
     top_level_package,
 )
-from patchpilot.agent.progress import Pressure, ProgressTracker
+from patchpilot.domain.enums import EventType
+from patchpilot.events.bus import MemorySink
+from patchpilot.repair.progress import Pressure, ProgressTracker
 from patchpilot.sandbox.guard import check_command, sanitize_command
 from patchpilot.sandbox.local import LocalSandbox
 
@@ -51,11 +53,12 @@ def test_a_failed_edit_does_not_count_as_progress() -> None:
 def test_each_escalation_is_announced_once() -> None:
     """Advice has to arrive without turning into per-iteration noise."""
     tracker = _tracker()
-    assert tracker.should_warn(Pressure.NUDGE) is True
-    assert tracker.should_warn(Pressure.NUDGE) is False
-    assert tracker.should_warn(Pressure.URGENT) is True
-    assert tracker.should_warn(Pressure.URGENT) is False
-    assert tracker.should_warn(Pressure.NONE) is False
+    assert tracker.should_warn("pressure:nudge") is True
+    assert tracker.should_warn("pressure:nudge") is False
+    assert tracker.should_warn("pressure:urgent") is True
+    assert tracker.should_warn("pressure:urgent") is False
+    # Distinct kinds of advice do not suppress one another.
+    assert tracker.should_warn("reinspect:sympy/core/mod.py") is True
 
 
 def test_milestones_record_the_iteration_they_happened_on() -> None:
@@ -70,7 +73,7 @@ def test_milestones_record_the_iteration_they_happened_on() -> None:
     snap = tracker.snapshot()
     assert snap["time_to_first_file_read"] == 2
     assert snap["time_to_first_hypothesis"] == 3
-    assert snap["time_to_first_edit"] == 4
+    assert snap["time_to_first_source_edit"] == 4
     assert snap["time_to_first_test"] == 5
     assert snap["time_to_first_green_test"] == 6
 
@@ -79,11 +82,11 @@ def test_never_editing_is_distinguishable_from_editing_late() -> None:
     """`patch_attempts == 0` read the same for both; None vs int does not."""
     explored = _tracker()
     explored.record_tool("read_file", {"path": "a.py"}, 1, succeeded=True)
-    assert explored.snapshot()["time_to_first_edit"] is None
+    assert explored.snapshot()["time_to_first_source_edit"] is None
 
     late = _tracker()
     late.record_tool("edit_file", {"path": "a.py"}, 19, succeeded=True)
-    assert late.snapshot()["time_to_first_edit"] == 19
+    assert late.snapshot()["time_to_first_source_edit"] == 19
 
 
 def test_the_last_file_read_is_offered_as_the_edit_target() -> None:
@@ -429,7 +432,7 @@ def test_unittest_is_the_fallback_without_pytest(tmp_path: Path) -> None:
     ],
 )
 def test_scratch_paths_are_recognised(path: str, scratch: bool) -> None:
-    from patchpilot.agent.progress import is_scratch
+    from patchpilot.repair.progress import is_scratch
 
     assert is_scratch(path) is scratch
 
@@ -444,7 +447,7 @@ def test_writing_a_repro_script_is_not_progress_toward_a_patch() -> None:
 
     tracker.record_tool("edit_file", {"path": "sympy/core/numbers.py"}, 20, succeeded=True)
     assert tracker.has_edit
-    assert tracker.snapshot()["time_to_first_edit"] == 20
+    assert tracker.snapshot()["time_to_first_source_edit"] == 20
 
 
 async def test_a_repro_script_in_the_repo_root_is_kept_out_of_the_patch(
@@ -470,3 +473,234 @@ async def test_a_new_module_inside_a_package_still_reaches_the_patch(workspace) 
 
     diff = await workspace.diff()
     assert "src/repro_helper.py" in diff
+
+
+# --------------------------------------------- the diagnosis-to-repair gates
+
+
+def _run_parts():
+    from patchpilot.agent.session import SessionConfig, run_agent_task
+    from patchpilot.providers.scripted import ScriptedProvider, ScriptedTurn
+    from tests.test_agent_loop import make_task
+
+    return make_task, run_agent_task, SessionConfig, ScriptedProvider, ScriptedTurn
+
+
+async def test_a_scratch_only_diff_cannot_be_finished_as_resolved(settings, tmp_path) -> None:
+    """CASE E, end to end. One instance submitted `repro_debug.py` as its whole
+    patch and was recorded as having produced one."""
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 5
+
+    script = [
+        Turn(
+            text="Reproducing.",
+            tool_calls=[("write_file", {"path": "repro_debug.py", "content": "print(1)\n"})],
+        ),
+        Turn(text="Done.", tool_calls=[("finish", {"resolved": True, "summary": "fixed it"})]),
+        Turn(
+            text="Fine.",
+            tool_calls=[("finish", {"resolved": False, "summary": "could not fix it"})],
+        ),
+    ]
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-gate-1"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(script=script),
+    )
+
+    codes = [c.error_code for c in result.tool_calls if c.tool == "finish"]
+    # The workspace strips the scratch file before `finish` ever sees the diff,
+    # so the earlier `no_patch` gate catches it. Two independent defences, and
+    # the outer one fires first -- which is the right order.
+    assert "no_patch" in codes
+    assert result.metrics.meaningful_patch is False
+    assert result.metrics.time_to_first_source_edit is None
+    assert result.metrics.scratch_writes == 1
+    assert "repro_debug.py" not in result.final_patch
+    assert result.metrics.patch_quality == "no_patch"
+
+
+async def test_giving_up_with_a_diagnosis_is_challenged_once(settings, tmp_path) -> None:
+    """All six empty-patch runs named the right file in their summary and never
+    edited it. One refusal converts that prose into an edit -- or is accepted."""
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 12
+
+    fix = "    if b == 0:\n        return None\n    return a / b"
+    script = [
+        Turn(text="Reading.", tool_calls=[("read_file", {"path": "src/calculator.py"})]),
+        Turn(
+            text="Reproducing.",
+            tool_calls=[("run_command", {"command": 'python -c "import src.calculator"'})],
+        ),
+        Turn(text="Giving up.", tool_calls=[("finish", {"resolved": False, "summary": "too hard"})]),
+        Turn(
+            text="Fixing after all.",
+            tool_calls=[
+                (
+                    "edit_file",
+                    {
+                        "path": "src/calculator.py",
+                        "old_string": "    return a / b",
+                        "new_string": fix,
+                    },
+                )
+            ],
+        ),
+        Turn(text="Done.", tool_calls=[("finish", {"resolved": False, "summary": "applied a fix"})]),
+    ]
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-gate-2"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(script=script),
+    )
+
+    codes = [c.error_code for c in result.tool_calls if c.tool == "finish"]
+    assert codes.count("diagnosis_without_repair") == 1, f"exactly one push, got {codes}"
+    assert result.metrics.meaningful_patch is True
+    assert result.metrics.time_to_first_source_edit == 4
+
+
+async def test_a_run_with_no_diagnosis_may_give_up_immediately(settings, tmp_path) -> None:
+    """CASE J. An agent that genuinely established nothing must not be trapped."""
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 6
+
+    script = [
+        Turn(
+            text="Nothing found.",
+            tool_calls=[("finish", {"resolved": False, "summary": "no idea where to look"})],
+        ),
+    ]
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-gate-3"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(script=script),
+    )
+
+    codes = [c.error_code for c in result.tool_calls if c.tool == "finish"]
+    assert "diagnosis_without_repair" not in codes
+    assert result.metrics.iterations == 1, "it stopped when asked"
+
+
+async def test_the_repair_push_does_not_repeat(settings, tmp_path) -> None:
+    """A second give-up is honoured, so the gate cannot become a trap."""
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 12
+
+    script = [
+        Turn(text="Reading.", tool_calls=[("read_file", {"path": "src/calculator.py"})]),
+        Turn(
+            text="Reproducing.",
+            tool_calls=[("run_command", {"command": 'python -c "import src.calculator"'})],
+        ),
+        Turn(text="Give up.", tool_calls=[("finish", {"resolved": False, "summary": "blocked"})]),
+        Turn(
+            text="Still giving up.",
+            tool_calls=[("finish", {"resolved": False, "summary": "genuinely blocked"})],
+        ),
+    ]
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-gate-4"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(script=script),
+    )
+
+    codes = [c.error_code for c in result.tool_calls if c.tool == "finish"]
+    assert codes.count("diagnosis_without_repair") == 1
+    assert result.state.is_terminal
+    assert result.metrics.meaningful_patch is False
+
+
+async def test_instrumenting_source_is_not_a_repair_either(settings, tmp_path) -> None:
+    """The inner gate: a diff that survives the scratch filter but only adds
+    prints to implementation code is still not a fix."""
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 6
+
+    script = [
+        Turn(
+            text="Adding a probe.",
+            tool_calls=[
+                (
+                    "edit_file",
+                    {
+                        "path": "src/calculator.py",
+                        "old_string": "    return a / b",
+                        "new_string": "    print('a', a, 'b', b)\n    return a / b",
+                    },
+                )
+            ],
+        ),
+        Turn(text="Testing.", tool_calls=[("run_tests", {})]),
+        Turn(text="Done.", tool_calls=[("finish", {"resolved": True, "summary": "instrumented"})]),
+        Turn(text="Fine.", tool_calls=[("finish", {"resolved": False, "summary": "not fixed"})]),
+    ]
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-gate-5"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(script=script),
+    )
+
+    codes = [c.error_code for c in result.tool_calls if c.tool == "finish"]
+    assert "no_meaningful_patch" in codes, f"debug-only diff was accepted: {codes}"
+    assert result.metrics.patch_quality == "debug_only"
+    assert result.metrics.meaningful_patch is False
+
+
+async def test_the_empty_patch_trajectory_is_interrupted(settings, tmp_path) -> None:
+    """Replays the shape of the six empty-patch runs and asserts we now steer.
+
+    The shape, taken from the trajectories: read the implementation, reproduce
+    the failure repeatedly, re-read the same file, never edit. Before this work
+    the loop said nothing at all until iteration 4 and then stayed silent; the
+    run reached its cap having changed nothing.
+    """
+    make_task, run_agent_task, SessionConfig, Provider, Turn = _run_parts()
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 12
+
+    def responder(messages, index):
+        # Alternate reading the same file and re-running the same reproduction,
+        # exactly as the failing runs did.
+        if index % 2 == 0:
+            return Turn(
+                text="Reading again.",
+                tool_calls=[("read_file", {"path": "src/calculator.py"})],
+            )
+        return Turn(
+            text="Reproducing again.",
+            tool_calls=[("run_command", {"command": 'python -c "import src.calculator"'})],
+        )
+
+    sink = MemorySink()
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-shape-1"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=Provider(responder=responder),
+        sinks=[sink],
+    )
+
+    kinds = [str(e.payload.get("kind")) for e in sink.of_type(EventType.RECOVERY_TRIGGERED)]
+    assert any(k.startswith("pressure:") for k in kinds), f"never pushed toward a repair: {kinds}"
+    assert "pressure:urgent" in kinds, "reproduction capture must escalate to urgent"
+    assert any(k.startswith("low_information") or k.startswith("reinspect") for k in kinds), (
+        f"re-reading one file was never challenged: {kinds}"
+    )
+
+    # And the run is honestly recorded as having produced nothing.
+    assert result.metrics.time_to_first_source_edit is None
+    assert result.metrics.meaningful_patch is False
+    assert result.metrics.reproductions_before_edit >= 3

@@ -15,6 +15,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from ...domain.enums import FailureClass
+from ...repair.patchquality import PatchAssessment, assess_patch
 from ..base import Tool, ToolContext, ToolResult
 
 
@@ -101,6 +102,24 @@ class FinishArgs(BaseModel):
     )
 
 
+def _should_push_for_a_repair(ctx: ToolContext, assessment: PatchAssessment) -> bool:
+    """Whether to refuse one give-up and ask for the repair the diagnosis implies.
+
+    Deliberately at most once per run, and only while there is budget to act on
+    it. An agent that has genuinely exhausted its options must be able to say so:
+    trapping it in a loop would be worse than the empty patch, and it can finish
+    immediately by calling again.
+    """
+    if ctx.state.get("repair_push_used"):
+        return False
+    if assessment.is_repair:
+        return False
+    if not ctx.state.get("repair_has_diagnosis"):
+        return False
+    remaining = ctx.state.get("budget_fraction_remaining")
+    return isinstance(remaining, (int, float)) and remaining >= 0.15
+
+
 class FinishTool(Tool[FinishArgs]):
     name = "finish"
     description = (
@@ -114,6 +133,7 @@ class FinishTool(Tool[FinishArgs]):
     async def execute(self, ctx: ToolContext, args: FinishArgs) -> ToolResult:
         diff = await ctx.workspace.diff()
         outcome = ctx.state.get("last_test_outcome")
+        assessment = assess_patch(diff)
 
         if args.resolved:
             if not diff.strip():
@@ -121,6 +141,16 @@ class FinishTool(Tool[FinishArgs]):
                     "Cannot finish as resolved: the working tree has no changes. "
                     "Apply your fix first.",
                     code="no_patch",
+                )
+            if not assessment.is_repair:
+                # One run submitted a debug script as its entire patch and was
+                # recorded as having produced one. Investigation debris is not a
+                # repair, whatever the agent believes about it.
+                return ToolResult.failure(
+                    f"Cannot finish as resolved: {assessment.describe()}. "
+                    "A run only counts if the diff changes implementation code. "
+                    "Convert your diagnosis into a source edit.",
+                    code="no_meaningful_patch",
                 )
             if outcome is None:
                 return ToolResult.failure(
@@ -145,6 +175,22 @@ class FinishTool(Tool[FinishArgs]):
                     "Run the tests again.",
                     code="tests_stale",
                 )
+
+        if not args.resolved and _should_push_for_a_repair(ctx, assessment):
+            ctx.state["repair_push_used"] = True
+            candidate = ctx.state.get("repair_candidate_file")
+            where = f" Start with `{candidate}`." if candidate else ""
+            return ToolResult.failure(
+                "Not so fast: you have a working diagnosis but "
+                f"{assessment.describe()}, and you still have budget left. "
+                "Every empty-patch run in the last benchmark named the right file "
+                "in its summary and never edited it -- a diagnosis that stays in "
+                f"prose scores nothing.{where} Make the smallest source change "
+                "your diagnosis implies, then re-run the check. If you truly "
+                "cannot, call finish again and say what specific unknown blocked "
+                "you.",
+                code="diagnosis_without_repair",
+            )
 
         ctx.state["finish_requested"] = True
         ctx.state["finish_resolved"] = bool(args.resolved)

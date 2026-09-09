@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..domain.enums import FailureClass, RunState
+from ..repair.patchquality import PatchAssessment, assess_patch
 
 
 @dataclass
@@ -134,7 +135,27 @@ class RunMetrics:
     # and nothing in the metrics said so: `patch_attempts` was 0, which reads
     # identically to "tried once and the patch failed to apply".
     time_to_first_edit: int | None = None
-    """Iteration of the first successful edit. None means the run never edited."""
+    """Alias of :attr:`time_to_first_source_edit`, kept for continuity."""
+    time_to_first_source_edit: int | None = None
+    """Iteration implementation code was first changed. ``None`` means never --
+    the failure mode that produced six empty patches in the first batch."""
+    time_to_first_any_write: int | None = None
+    time_to_first_scratch_write: int | None = None
+    time_to_first_test_edit: int | None = None
+    time_to_first_behaviour_check: int | None = None
+    """First reproduction run *after* a source edit. Every resolved run in the
+    first batch did this; no empty-patch run reached it."""
+    reproductions_before_edit: int = 0
+    """Reproductions run before any source edit. The empty-patch runs scored
+    1, 2, 5, 7 and 10 here; every run that produced a patch scored 0."""
+    source_edits: int = 0
+    scratch_writes: int = 0
+    patch_quality: str = "no_patch"
+    meaningful_patch: bool = False
+    interventions: int = 0
+    """Times the loop steered the agent toward a repair. High counts mean the
+    controller worked hard; combined with a null time_to_first_source_edit it
+    means it worked hard and was ignored."""
     time_to_first_file_read: int | None = None
     time_to_first_hypothesis: int | None = None
     time_to_first_test: int | None = None
@@ -163,6 +184,17 @@ class RunMetrics:
             "cost_usd": self.cost_usd,
             "loop_signals": self.loop_signals,
             "time_to_first_edit": self.time_to_first_edit,
+            "time_to_first_source_edit": self.time_to_first_source_edit,
+            "time_to_first_any_write": self.time_to_first_any_write,
+            "time_to_first_scratch_write": self.time_to_first_scratch_write,
+            "time_to_first_test_edit": self.time_to_first_test_edit,
+            "time_to_first_behaviour_check": self.time_to_first_behaviour_check,
+            "reproductions_before_edit": self.reproductions_before_edit,
+            "source_edits": self.source_edits,
+            "scratch_writes": self.scratch_writes,
+            "patch_quality": self.patch_quality,
+            "meaningful_patch": self.meaningful_patch,
+            "interventions": self.interventions,
             "time_to_first_file_read": self.time_to_first_file_read,
             "time_to_first_hypothesis": self.time_to_first_hypothesis,
             "time_to_first_test": self.time_to_first_test,
@@ -182,6 +214,8 @@ class AgentResult:
     failure_class: FailureClass | None = None
     stop_reason: str = ""
     error: str | None = None
+    patch_assessment: PatchAssessment = field(default_factory=lambda: assess_patch(""))
+    """What the final diff actually is, judged from the diff itself."""
     agent_claimed_resolved: bool = False
     """What the agent asserted via `finish`, kept apart from the evidence.
 

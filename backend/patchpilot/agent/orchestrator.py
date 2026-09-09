@@ -34,6 +34,8 @@ from ..errors import ProviderError
 from ..events.bus import EventBus, RunEmitter
 from ..logging_setup import get_logger
 from ..providers.base import ModelProvider, ToolCallResult
+from ..repair.patchquality import assess_patch
+from ..repair.progress import Pressure, ProgressTracker
 from ..sandbox.base import Sandbox
 from ..tools.base import ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
@@ -43,7 +45,6 @@ from .budget import Budget, BudgetTracker
 from .environment import RuntimeEnvironment
 from .environment import apply_to_sandbox as apply_environment
 from .environment import probe as probe_environment
-from .progress import ProgressTracker
 from .prompts import (
     budget_warning_message,
     build_system_prompt,
@@ -51,6 +52,7 @@ from .prompts import (
     failure_classification_hint,
     final_turn_message,
     initial_user_message,
+    low_information_message,
     no_patch_yet_message,
     recovery_message,
 )
@@ -202,6 +204,8 @@ class AgentOrchestrator:
         self._cancelled = False
         self._wrapup_used = False
         self._pending_directives: list[str] = []
+        self._interventions: list[str] = []
+        """Every steer the loop applied, in order, for the run record."""
         self.environment = RuntimeEnvironment()
         self.progress = ProgressTracker()
         self.iteration_extension_fraction = 0.25
@@ -324,7 +328,10 @@ class AgentOrchestrator:
                 if d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _SKIP_DIRS
             )
 
-        has_pytest = self.environment.has_pytest or not self.environment.probed
+        # Only a *successful* probe can tell us pytest is absent. If it could not
+        # find an interpreter at all it knows nothing, and assuming "no pytest"
+        # would steer every ordinary Python project away from its real runner.
+        has_pytest = self.environment.has_pytest or not self.environment.usable
         for directory in candidates:
             command = _test_command_for(directory, has_pytest=has_pytest)
             if command is None:
@@ -382,6 +389,7 @@ class AgentOrchestrator:
             self.emitter.set_iteration(iteration)
             await self.emitter.iteration_started(iteration, self.budget.snapshot())
 
+            self._publish_repair_state()
             self._inject_pending_directives()
             self._maybe_warn_about_budget()
 
@@ -413,7 +421,7 @@ class AgentOrchestrator:
                 mutated=mutated, saw_new_file=len(self.progress.files_seen) > files_before
             )
             await self._check_for_loops()
-            self._maybe_push_toward_a_patch()
+            await self._maybe_push_toward_a_patch()
 
             self.transcript.add_user(
                 continuation_message(
@@ -714,47 +722,94 @@ class AgentOrchestrator:
         must not become a way of papering over the paralysis the rest of these
         changes address.
         """
-        if not self.progress.has_edit:
-            return 0
+        if not self.progress.has_source_edit:
+            return 0  # nothing to protect; more turns would be more exploration
         if self.result.metrics.verified_by_tests:
             return 0  # already green; the wrap-up turn is enough to report it
-        if not self.result.test_runs:
-            return 0  # never tested: more exploration is not the problem
-        last_tested_at = self.result.test_runs[-1].iteration
-        if self.budget.iterations - last_tested_at > 3:
+        if not (self.result.test_runs or self.progress.behaviour_checked):
+            # A run that has never checked its own change is not converging on
+            # anything; extra turns reward the trajectory we are trying to end.
+            return 0
+        last_checked_at = max(
+            [r.iteration for r in self.result.test_runs]
+            + ([self.progress.first_behaviour_check]
+               if self.progress.first_behaviour_check else [])
+        )
+        if self.budget.iterations - last_checked_at > 3:
             return 0  # no longer in the patch-test-observe cycle
         base = self.budget.budget.max_iterations
         return max(1, round(base * self.iteration_extension_fraction))
 
-    def _maybe_push_toward_a_patch(self) -> None:
-        """Escalate toward an edit when a run is all investigation and no patch.
+    def _publish_repair_state(self) -> None:
+        """Expose repair state to the tools, so `finish` can reason about it.
 
-        Six of fifteen benchmark runs reached the iteration cap without editing
-        anything, and the anti-loop detector had nothing to say about it -- none
-        of them was repeating an action, they were each exploring something new
-        every turn. Repetition and paralysis are different failures, so this
-        watches a different signal: budget consumed with no edit at all.
+        One source of truth: the tracker owns the state, the tools read it. The
+        alternative -- tools recomputing progress from the transcript -- is how
+        two components come to disagree about whether a run has a diagnosis.
+        """
+        budget = self.budget.budget.max_iterations or 1
+        self.tool_state["repair_has_diagnosis"] = self.progress.has_diagnosis
+        self.tool_state["repair_candidate_file"] = self.progress.best_candidate()
+        self.tool_state["budget_fraction_remaining"] = max(
+            0.0, (budget - self.budget.iterations) / budget
+        )
 
-        It advises; it never edits. Forcing a change at a fixed iteration would
+    async def _maybe_push_toward_a_patch(self) -> None:
+        """Escalate toward a *source* edit when a run is all investigation.
+
+        Two failures live here, and they need different words.
+
+        *Paralysis*: six of fifteen runs reached the iteration cap without
+        editing. The anti-loop detector said nothing, because none of them was
+        repeating an action -- each turn explored something new. All six named
+        the right file in their final summary and never opened an editor on it.
+
+        *Reproduction capture*: the second pass found the mechanism. Every one of
+        those runs built a reproduction before editing (up to ten times); every
+        run that produced a patch reproduced only afterwards. Rebuilding the
+        reproduction feels like progress and is not.
+
+        This advises; it never edits. Forcing a change at a fixed iteration would
         trade six no-patch runs for six random-patch runs.
         """
         if self._pending_directives:
             # The loop detector already has something to say this iteration.
             # Two long directives at once buries both.
             return
+
         pressure = self.progress.pressure(
             self.budget.iterations, self.budget.budget.max_iterations
         )
-        if not self.progress.should_warn(pressure):
-            return
-        self._pending_directives.append(
-            no_patch_yet_message(
-                pressure=str(pressure),
-                budget_line=self.budget.describe_remaining(),
-                candidate=self.progress.best_candidate(),
+        if pressure is not Pressure.NONE:
+            key = f"pressure:{pressure}"
+            if self.progress.should_warn(key):
+                directive = no_patch_yet_message(
+                    pressure=str(pressure),
+                    budget_line=self.budget.describe_remaining(),
+                    candidate=self.progress.best_candidate(),
+                    learned=self._what_we_know(),
+                    reproductions=self.progress.reproductions_before_edit,
+                )
+                self._pending_directives.append(directive)
+                self._interventions.append(key)
+                await self.emitter.recovery_triggered(kind=key, directive=directive)
+                return
+
+        # Re-reading something that has already been read to exhaustion cannot
+        # change the repair. Successful runs peaked at 1-2 looks per target;
+        # the empty-patch runs reached 5-7.
+        target = self.progress.over_inspected()
+        if target and self.progress.should_warn(f"reinspect:{target}"):
+            directive = low_information_message(
+                target=target,
+                has_patch=self.progress.has_source_edit,
                 learned=self._what_we_know(),
             )
-        )
+            self._pending_directives.append(directive)
+            self._interventions.append(f"reinspect:{target}")
+            await self.emitter.recovery_triggered(
+                kind="low_information", directive=directive
+            )
 
     def _maybe_warn_about_budget(self) -> None:
         remaining = self.budget.budget.max_iterations - self.budget.iterations
@@ -805,10 +860,18 @@ class AgentOrchestrator:
             log.warning("agent.final_diff_failed", error=str(exc))
             stat = None
 
-        # A run that claims RESOLVED with no patch is not resolved.
-        if state is RunState.RESOLVED and not self.result.final_patch.strip():
+        # What the diff *is*, judged from the diff rather than from the agent's
+        # opinion of it. A run whose only changes are debug artefacts produced no
+        # repair, however confidently it reported otherwise.
+        self.result.patch_assessment = assess_patch(self.result.final_patch)
+
+        # A run that claims RESOLVED without a real repair is not resolved.
+        if state is RunState.RESOLVED and not self.result.patch_assessment.is_repair:
             state = RunState.FAILED
-            stop_reason = "agent reported success but produced no patch"
+            stop_reason = (
+                "agent reported success but the diff contains no repair: "
+                f"{self.result.patch_assessment.describe()}"
+            )
 
         self.result.state = state
         self.result.stop_reason = stop_reason
@@ -834,12 +897,23 @@ class AgentOrchestrator:
             loop_signals=self.result.metrics.loop_signals,
             # Progress diagnostics. This constructor replaces the metrics object
             # wholesale, so anything not carried across here is silently lost.
-            time_to_first_edit=self.progress.first_edit,
+            time_to_first_edit=self.progress.first_source_edit,
+            time_to_first_source_edit=self.progress.first_source_edit,
+            time_to_first_any_write=self.progress.first_any_write,
+            time_to_first_scratch_write=self.progress.first_scratch_write,
+            time_to_first_test_edit=self.progress.first_test_edit,
+            time_to_first_behaviour_check=self.progress.first_behaviour_check,
             time_to_first_file_read=self.progress.first_file_read,
             time_to_first_hypothesis=self.progress.first_hypothesis,
             time_to_first_test=self.progress.first_test_run,
             time_to_first_green_test=self.progress.first_green_test,
             verified_by_tests=self.result.metrics.verified_by_tests,
+            reproductions_before_edit=self.progress.reproductions_before_edit,
+            source_edits=self.progress.source_edits,
+            scratch_writes=self.progress.scratch_writes,
+            patch_quality=str(self.result.patch_assessment.quality),
+            meaningful_patch=self.result.patch_assessment.is_repair,
+            interventions=len(self._interventions),
         )
 
         if stat is not None and self.result.final_patch.strip():
