@@ -161,6 +161,23 @@ def budget_warning_message(limit: str, budget_line: str) -> str:
     )
 
 
+def final_turn_message(limit: str, learned: str) -> str:
+    """The one turn granted after the budget is spent.
+
+    Only `finish` is available here, so this asks for a verdict rather than
+    more work. An agent that used its last iteration validating a fix should
+    still get to report it.
+    """
+    return (
+        f"FINAL TURN — your {limit} budget is exhausted. You cannot take any more "
+        "actions; the only tool available is `finish`.\n\n"
+        f"What this run established:\n{learned}\n\n"
+        "Call finish now. Use resolved=true if a test run actually passed and the "
+        "working tree contains your fix; otherwise resolved=false with what you "
+        "found and what remained. Either way, summarise the change you made."
+    )
+
+
 def failure_classification_hint(outcome_description: str) -> str:
     classes = ", ".join(str(c) for c in FailureClass if c is not FailureClass.UNKNOWN)
     return (

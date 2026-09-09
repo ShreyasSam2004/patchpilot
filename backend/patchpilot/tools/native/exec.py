@@ -58,6 +58,14 @@ class RunTestsArgs(BaseModel):
             "first, then broaden."
         ),
     )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Repository-relative directory to run the tests from. Needed for "
+            "monorepos where the suite lives in a subdirectory, e.g. 'backend'. "
+            "Defaults to the run's discovered test directory, else the repo root."
+        ),
+    )
     timeout_s: int | None = Field(
         default=None, ge=5, le=3600, description="Override the test timeout."
     )
@@ -83,6 +91,7 @@ class RunTestsTool(Tool[RunTestsArgs]):
     async def execute(self, ctx: ToolContext, args: RunTestsArgs) -> ToolResult:
         default = ctx.state.get("test_command") or "python -m pytest -q"
         argv = _tokenize(args.command or default)
+        cwd = args.cwd if args.cwd is not None else ctx.state.get("test_cwd")
 
         verdict = check_command(argv)
         if not verdict:
@@ -93,11 +102,13 @@ class RunTestsTool(Tool[RunTestsArgs]):
             ctx.settings.max_test_runtime_s,
         )
         command_str = shlex.join(argv)
+        if cwd:
+            command_str = f"({cwd}) {command_str}"
 
         if ctx.emit is not None:
             await ctx.emit.test_started(command_str)
 
-        result = await ctx.sandbox.exec(argv, timeout_s=timeout)
+        result = await ctx.sandbox.exec(argv, cwd=cwd, timeout_s=timeout)
         outcome = parse_test_output(
             result.stdout, result.stderr, result.exit_code, timed_out=result.timed_out
         )

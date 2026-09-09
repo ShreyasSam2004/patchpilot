@@ -21,6 +21,15 @@
 
 FROM python:3.11-slim
 
+# Node.js, so a JS/TS repository has a runtime at all. Copied from the official
+# image rather than apt so the version is current and the layer is small.
+# NB: this gives node/npm/npx, NOT a repository's node_modules -- with
+# --network none those cannot be installed at run time either. A JS project
+# with dependencies still needs a derived image that has run `npm ci`.
+COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:20-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
 # git: the workspace layer uses it for diff, apply, status and checkout.
 # The rest are what a Python test suite typically shells out to.
 RUN apt-get update \

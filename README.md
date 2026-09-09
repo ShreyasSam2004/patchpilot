@@ -567,6 +567,11 @@ See [`docs/SECURITY.md`](docs/SECURITY.md).
   image must be pre-provisioned with the repository's dependencies. The
   bundled `patchpilot/runner` image covers git plus a standard pytest stack;
   a project with extra dependencies needs a derived image.
+- **Non-Python repositories need a provisioned image.** The bundled
+  `patchpilot/runner` image carries git, a pytest stack and Node 20, so a JS/TS
+  repo has a runtime — but `--network none` means `npm ci` / `pip install`
+  cannot run, so any project with third-party dependencies still needs a
+  derived image.
 - **Arbitrary repositories need their own sandbox image.** The Docker sandbox
   has no network, so a repo with third-party dependencies needs an image that
   already has them — pass one as `docker_image` on the run. Benchmark tasks get

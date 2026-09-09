@@ -681,3 +681,137 @@ async def test_find_symbol_tolerates_a_def_prefix(registry, tool_ctx) -> None:
     assert plain.ok and prefixed.ok
     assert prefixed.data["definition_count"] == plain.data["definition_count"] >= 1
     assert prefixed.data["symbol"] == "divide"
+
+
+async def test_a_green_run_that_uses_its_whole_budget_can_still_finish(
+    settings, tmp_path
+) -> None:
+    """Spending the last iteration on a final validation must not lose the work.
+
+    A real run fixed a bug correctly, ran the full suite green on its final
+    iteration, and was recorded as TIMEOUT / NOT RESOLVED because the budget
+    check fired before it could call finish. The budget bounds how much *work*
+    the agent may do, not its ability to report a verdict.
+    """
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 3
+    offered: list[list[str]] = []
+
+    provider = ScriptedProvider(
+        responder=lambda messages, index: (
+            ScriptedTurn(
+                tool_calls=[
+                    (
+                        "edit_file",
+                        {
+                            "path": "src/calculator.py",
+                            "old_string": "    return a / b",
+                            "new_string": "    if b == 0:\n        return None\n    return a / b",
+                        },
+                    )
+                ]
+            )
+            if index == 0
+            else ScriptedTurn(tool_calls=[("run_tests", {})])
+            if index in (1, 2)
+            # Iterations are spent; this is the granted final turn.
+            else ScriptedTurn(
+                text="Budget spent, reporting.",
+                tool_calls=[
+                    ("finish", {"resolved": True, "summary": "Guarded divide() against b == 0."})
+                ],
+            )
+        )
+    )
+
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-wrapup-1"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=provider,
+    )
+    offered = provider.seen_tools
+
+    assert result.state is RunState.RESOLVED, result.stop_reason
+    assert "return None" in result.final_patch
+    assert result.metrics.iterations == 3, "the work budget is still enforced"
+
+    # The final turn must offer only `finish`, so it cannot be spent on work.
+    assert offered[-1] == ["finish"], offered[-1]
+    assert len(offered[-2]) > 1
+
+
+async def test_the_final_turn_is_granted_only_once(settings, tmp_path) -> None:
+    """An agent that ignores the wrap-up turn still terminates."""
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 2
+
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-wrapup-2"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        # Never calls finish, not even on the final turn.
+        provider=ScriptedProvider(
+            responder=lambda messages, index: ScriptedTurn(
+                text="still looking", tool_calls=[("list_files", {})]
+            )
+        ),
+    )
+    assert result.state is RunState.TIMEOUT
+    assert "max_iterations" in result.stop_reason
+
+
+# ------------------------------------------------- polyglot test discovery
+
+
+def test_discovery_recognises_each_ecosystem(tmp_path) -> None:
+    import json as _json
+
+    from patchpilot.agent.orchestrator import _test_command_for
+
+    (tmp_path / "py").mkdir()
+    (tmp_path / "py" / "pyproject.toml").write_text("[project]", encoding="utf-8")
+    (tmp_path / "js").mkdir()
+    (tmp_path / "js" / "package.json").write_text(
+        _json.dumps({"scripts": {"test": "jest"}}), encoding="utf-8"
+    )
+    (tmp_path / "jsbare").mkdir()
+    (tmp_path / "jsbare" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "go").mkdir()
+    (tmp_path / "go" / "go.mod").write_text("module x", encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+
+    assert _test_command_for(tmp_path / "py") == "python -m pytest -q"
+    assert _test_command_for(tmp_path / "js") == "npm test --silent"
+    assert _test_command_for(tmp_path / "jsbare") == "npx jest"
+    assert _test_command_for(tmp_path / "go") == "go test ./..."
+    assert _test_command_for(tmp_path / "empty") is None
+
+
+async def test_run_tests_accepts_a_subdirectory(registry, tool_ctx) -> None:
+    """A monorepo keeps its suite in a subdirectory.
+
+    Commands never go through a shell, so `cd backend && npx jest` is refused
+    by the guard. Without a cwd the agent would be structurally unable to run
+    the tests at all — which is exactly what happened on a real TypeScript run.
+    """
+    workspace = tool_ctx.workspace
+    workspace.write_text("backend/tests/test_thing.py", "def test_ok():\n    assert True\n")
+
+    result = await registry.call(
+        "run_tests",
+        tool_ctx,
+        {"command": f"{PY} -m pytest -q tests/", "cwd": "backend"},
+    )
+    assert result.ok, result.content
+    assert result.data["green"] is True
+    assert result.data["passed"] == 1
+    assert "(backend)" in result.data["command"]
+
+
+async def test_run_tests_cwd_cannot_escape_the_workspace(registry, tool_ctx) -> None:
+    result = await registry.call(
+        "run_tests", tool_ctx, {"command": f"{PY} --version", "cwd": "../../etc"}
+    )
+    assert not result.ok
+    assert result.error_code == "path_escape"

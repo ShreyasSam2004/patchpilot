@@ -19,6 +19,8 @@ Three properties matter more than the code volume here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,6 +44,7 @@ from .prompts import (
     build_system_prompt,
     continuation_message,
     failure_classification_hint,
+    final_turn_message,
     initial_user_message,
     recovery_message,
 )
@@ -56,6 +59,37 @@ from .result import (
 from .transcript import Transcript
 
 log = get_logger(__name__)
+
+#: Directories that never contain the project's own test suite.
+_SKIP_DIRS = frozenset(
+    {"node_modules", "venv", ".venv", "dist", "build", "docs", "examples",
+     "vendor", "third_party", "site-packages", "target", "bin", "obj"}
+)
+
+
+def _test_command_for(directory: Path) -> str | None:
+    """The test command a directory's layout implies, or None."""
+    if (directory / "package.json").exists():
+        try:
+            manifest = json.loads((directory / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if isinstance(manifest.get("scripts"), dict) and "test" in manifest["scripts"]:
+            return "npm test --silent"
+        return "npx jest"
+
+    for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py"):
+        if (directory / marker).exists():
+            return "python -m pytest -q"
+    for tests in ("tests", "test"):
+        candidate = directory / tests
+        if candidate.is_dir() and any(candidate.glob("test_*.py")):
+            return "python -m pytest -q"
+    if (directory / "go.mod").exists():
+        return "go test ./..."
+    if (directory / "Cargo.toml").exists():
+        return "cargo test"
+    return None
 
 
 @dataclass
@@ -105,6 +139,7 @@ class AgentOrchestrator:
         self.result = AgentResult(run_id=task.run_id, state=RunState.PENDING)
         self._files_modified: set[str] = set()
         self._cancelled = False
+        self._wrapup_used = False
         self._pending_directives: list[str] = []
 
     # ------------------------------------------------------------------ state
@@ -153,11 +188,13 @@ class AgentOrchestrator:
         )
 
         if self.task.test_command is None:
-            discovered = await self._discover_test_command()
+            discovered, cwd = await self._discover_test_command()
             self.tool_state["test_command"] = discovered
+            self.tool_state["test_cwd"] = cwd
             await self.emitter.warning(
                 "no test command supplied; using a discovered default",
                 test_command=discovered,
+                test_cwd=cwd,
             )
 
         await self._set_state(RunState.ANALYZING)
@@ -166,21 +203,38 @@ class AgentOrchestrator:
             tools_available=self.registry.allowed_names,
             tools_blocked=self.registry.blocked_names,
             test_command=self.tool_state.get("test_command"),
+            test_cwd=self.tool_state.get("test_cwd"),
         )
 
         self.transcript.add_user(initial_user_message(self.budget.describe_remaining()))
 
-    async def _discover_test_command(self) -> str:
-        """Pick a plausible default test command from the repository layout."""
+    async def _discover_test_command(self) -> tuple[str, str | None]:
+        """Guess a test command, and the directory to run it from.
+
+        Returns ``(command, cwd)``. The cwd matters: in a monorepo the suite
+        often lives in a subdirectory, and since commands never go through a
+        shell there is no `cd x && ...` escape hatch — the agent would be
+        structurally unable to run the tests without this.
+        """
         root = self.workspace.root
-        if (root / "package.json").exists() and not any(root.glob("**/test_*.py")):
-            return "npm test"
-        for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py"):
-            if (root / marker).exists():
-                return "python -m pytest -q"
-        if (root / "tests").exists() or (root / "test").exists():
-            return "python -m pytest -q"
-        return "python -m pytest -q"
+
+        # Search the root first, then one level down. Deeper than that and the
+        # guess is more likely to be wrong than useful.
+        candidates: list[Path] = [root]
+        with contextlib.suppress(OSError):
+            candidates += sorted(
+                d for d in root.iterdir()
+                if d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _SKIP_DIRS
+            )
+
+        for directory in candidates:
+            command = _test_command_for(directory)
+            if command is None:
+                continue
+            relative = None if directory == root else self.workspace.relpath(directory)
+            return command, relative
+
+        return "python -m pytest -q", None
 
     # ------------------------------------------------------------- main loop
     async def _loop(self) -> None:
@@ -202,6 +256,12 @@ class AgentOrchestrator:
             limit = self.budget.exceeded()
             if limit:
                 await self.emitter.budget_exceeded(limit=limit, snapshot=self.budget.snapshot())
+                # The budget bounds how much *work* the agent may do, not its
+                # ability to report. Without this, an agent that spends its last
+                # iteration on a final validation run — exactly the right thing
+                # to do — has a complete, green patch discarded as TIMEOUT.
+                if await self._final_turn(system_prompt, limit):
+                    return
                 await self._finalize(
                     RunState.TIMEOUT, f"stopped after reaching the {limit} limit"
                 )
@@ -253,6 +313,39 @@ class AgentOrchestrator:
                 mutated=mutated,
                 files_modified=sorted(self._files_modified),
             )
+
+    async def _final_turn(self, system_prompt: str, limit: str) -> bool:
+        """Give the agent one last turn, to conclude rather than to work.
+
+        Only ``finish`` is offered, so the turn cannot be spent on more
+        investigation. Returns True if the run reached a terminal state.
+        """
+        if self._wrapup_used:
+            return False
+        self._wrapup_used = True
+
+        try:
+            finish_tool = self.registry.get("finish").spec().to_dict()
+        except Exception:
+            return False
+
+        await self._set_state(RunState.REFLECTING)
+        self.transcript.add_user(final_turn_message(limit, self._what_we_know()))
+
+        response = await self._call_model(system_prompt, [finish_tool])
+        if response is None:
+            return True  # _call_model already finalised the run
+
+        await self.emitter.agent_message(response.text)
+        self.transcript.add_assistant(response.text, response.tool_calls)
+        if not response.tool_calls:
+            return False
+
+        await self._execute_tool_calls(response.tool_calls, self.budget.iterations)
+        if self.tool_state.get("finish_requested"):
+            await self._handle_finish()
+            return True
+        return False
 
     async def _call_model(self, system_prompt: str, tool_specs: list[dict[str, Any]]):
         await self.emitter.model_call_started(

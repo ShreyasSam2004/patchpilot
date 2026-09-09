@@ -86,7 +86,7 @@ constructed by tests, never from configuration.
 | `edit_file` | Exact unique-anchor string replacement | ✓ |
 | `write_file` | Whole-file write (for genuinely new files) | ✓ |
 | `git_diff` / `git_status` / `git_log` | Inspect the working tree and history | |
-| `run_tests` | Run tests, parse the summary, extract the failure section | |
+| `run_tests` | Run tests, optionally from a subdirectory (`cwd`), parse the summary | |
 | `run_command` | Linter, type checker, build step, repro script | |
 | `record_hypothesis` | Structured root-cause claim before editing | |
 | `finish` | End the run — guarded against unearned success | |
