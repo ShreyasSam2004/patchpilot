@@ -72,9 +72,12 @@ exclude = ["fixtures/", "\\.venv/"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Network-dependent tests are opt-in so the default suite is hermetic:
+#   pytest -m live
+addopts = "-m 'not live'"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "integration: end-to-end agent loop tests (slower)",
     "docker: requires a running Docker daemon",
-    "live: requires real model API credentials",
+    "live: hits the network (HuggingFace dataset, git clone) or needs real credentials",
 ]

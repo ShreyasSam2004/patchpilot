@@ -478,8 +478,9 @@ missing and refuses to show a resolve rate rather than defaulting to 0%.
 
 ```bash
 cd backend
-pytest                       # 182 tests
-pytest -m "not integration"  # unit only
+pytest                       # 213 hermetic tests
+pytest -m live               # 6 more that hit the network (opt-in)
+pytest -m "not integration"  # fast unit tests only
 ruff check . && mypy patchpilot
 
 cd ../frontend
@@ -502,6 +503,7 @@ FastAPI app, the real worker.
 | Benchmark | harness report parsing (both layouts), prediction schema, no answer-key leakage |
 | API | 28 endpoints, event ordering, resume cursors, secret redaction |
 | End-to-end | HTTP → queue → worker → agent → events → API, and queue claim races |
+| Live (opt-in) | The real SWE-bench Lite dataset, deterministic instance selection, and a real `git clone` + checkout at an exact commit |
 
 ## Security considerations
 
