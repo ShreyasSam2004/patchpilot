@@ -171,6 +171,21 @@ class ReviewAction(StrEnum):
     PUBLISH_FAILED = "PUBLISH_FAILED"
 
 
+class PublicationStrategy(StrEnum):
+    """How an approved patch reaches a pull request.
+
+    Chosen by the backend from the credential's actual permissions, never by
+    the agent and never by the reviewer: which repository we may write to is a
+    fact about the token, not a preference.
+    """
+
+    DIRECT = "DIRECT"
+    """The credential can push to upstream. Branch lives in upstream."""
+    FORK = "FORK"
+    """The credential cannot push to upstream. Branch lives in the
+    authenticated user's fork; the pull request still targets upstream."""
+
+
 class PublicationStep(StrEnum):
     """Ordered steps of a publication, recorded as each one succeeds.
 
@@ -181,6 +196,8 @@ class PublicationStep(StrEnum):
 
     VERIFIED_DIGEST = "VERIFIED_DIGEST"
     RESOLVED_REPOSITORY = "RESOLVED_REPOSITORY"
+    SELECTED_STRATEGY = "SELECTED_STRATEGY"
+    RESOLVED_FORK = "RESOLVED_FORK"
     CHECKED_DRIFT = "CHECKED_DRIFT"
     APPLIED_PATCH = "APPLIED_PATCH"
     VERIFIED_APPLIED_DIFF = "VERIFIED_APPLIED_DIFF"
@@ -207,6 +224,10 @@ class PublishErrorCode(StrEnum):
     APPLIED_DIFF_MISMATCH = "APPLIED_DIFF_MISMATCH"
     PUSH_FAILED = "PUSH_FAILED"
     PR_CREATE_FAILED = "PR_CREATE_FAILED"
+    FORK_CREATE_FAILED = "FORK_CREATE_FAILED"
+    FORK_NOT_READY = "FORK_NOT_READY"
+    FORK_BASE_UNAVAILABLE = "FORK_BASE_UNAVAILABLE"
+    IDENTITY_UNKNOWN = "IDENTITY_UNKNOWN"
     RATE_LIMITED = "RATE_LIMITED"
     PROTECTED_BRANCH = "PROTECTED_BRANCH"
     UNKNOWN = "UNKNOWN"

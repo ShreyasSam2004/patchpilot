@@ -10,7 +10,7 @@
  * into the team's normal process.
  */
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import type {
   Publication,
@@ -85,9 +85,12 @@ function Verification({ version }: { version: PatchVersion }) {
 
 function Steps({ publication }: { publication: Publication }) {
   const done = new Set(publication.completed_steps ?? []);
+  const isFork = publication.strategy === "FORK";
   const rows: [string, string][] = [
     ["VERIFIED_DIGEST", "Approved patch verified"],
     ["RESOLVED_REPOSITORY", "Repository resolved"],
+    ["SELECTED_STRATEGY", "Publication method chosen"],
+    ...((isFork ? [["RESOLVED_FORK", "Fork resolved"]] : []) as [string, string][]),
     ["CHECKED_DRIFT", "Base branch checked"],
     ["VERIFIED_APPLIED_DIFF", "Applied diff matches approval"],
     ["COMMIT_CREATED", "Commit created"],
@@ -132,11 +135,54 @@ function Checks({ publication }: { publication: Publication }) {
   );
 }
 
+/** Where the change is going, and by which route.
+ *
+ *  Shown rather than chosen. Whether a fork is needed is a fact about the
+ *  credential's permissions, so offering it as an option would invite someone
+ *  to pick the one that cannot work.
+ */
+function Routing({ publication }: { publication: Publication }) {
+  const isFork = publication.strategy === "FORK";
+  const upstream = `${publication.owner}/${publication.repo}`;
+  const head =
+    publication.head_owner && publication.head_repo
+      ? `${publication.head_owner}/${publication.head_repo}`
+      : upstream;
+
+  const rows: [string, string][] = [
+    ["Publication method", isFork ? "Fork PR" : "Direct PR"],
+    ["Upstream", upstream],
+    ...((isFork ? [["Publishing from", head]] : []) as [string, string][]),
+    ...((publication.branch ? [["Branch", publication.branch]] : []) as [string, string][]),
+    ["Target", `${upstream}:${publication.base_branch}`],
+  ];
+
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12px]">
+      {rows.map(([label, value]) => (
+        <Fragment key={label}>
+          <dt className="text-[var(--text-muted)]">{label}</dt>
+          <dd className="font-mono">{value}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
 export function PublicationPanel({ publication }: { publication: Publication }) {
   return (
     <Panel title="GitHub publication">
       <div className="space-y-4 px-4 py-3">
+        <Routing publication={publication} />
         <Steps publication={publication} />
+
+        {publication.strategy === "FORK" && (
+          <p className="text-[11px] text-[var(--text-muted)]">
+            This account cannot push to {publication.owner}/{publication.repo}, so the
+            branch was published from a fork. The pull request still targets the
+            upstream repository.
+          </p>
+        )}
 
         {publication.base_drifted && (
           <p className="rounded border border-[var(--color-warn)] p-2 text-[12px]">

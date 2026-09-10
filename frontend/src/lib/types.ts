@@ -417,6 +417,13 @@ export interface PatchVersion {
 }
 
 export interface Publication {
+  /** DIRECT when the credential can push to upstream, FORK when it cannot.
+   *  Decided by the backend from GitHub permissions; informational here. */
+  strategy: "DIRECT" | "FORK";
+  /** Where the branch lives. Equal to owner/repo for DIRECT; the
+   *  authenticated user's fork for FORK. */
+  head_owner: string | null;
+  head_repo: string | null;
   state: ReviewState;
   provider: string;
   owner: string;

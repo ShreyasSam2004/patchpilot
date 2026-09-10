@@ -35,7 +35,13 @@ from ..logging_setup import get_logger
 from ..review.digest import canonical_patch, patch_digest
 from .branch import ensure_pushable
 from .credentials import GITHUB_API, GitHubCredentials
-from .ports import CheckRun, GitHostingError, PullRequestInfo, RepositoryInfo
+from .ports import (
+    AuthenticatedUser,
+    CheckRun,
+    GitHostingError,
+    PullRequestInfo,
+    RepositoryInfo,
+)
 
 log = get_logger(__name__)
 
@@ -92,13 +98,79 @@ class GitHubAdapter:
     # -- reads --------------------------------------------------------------
     async def get_repository(self, owner: str, repo: str) -> RepositoryInfo:
         body = (await self._request("GET", f"/repos/{owner}/{repo}")).json()
-        return RepositoryInfo(
-            full_name=body.get("full_name", f"{owner}/{repo}"),
-            default_branch=body.get("default_branch", "main"),
-            private=bool(body.get("private", False)),
-            html_url=body.get("html_url", f"https://github.com/{owner}/{repo}"),
-            permissions=body.get("permissions") or {},
+        return _repository(body, owner, repo)
+
+    # -- identity and forks -------------------------------------------------
+    async def get_authenticated_user(self) -> AuthenticatedUser:
+        """Who the credential is.
+
+        A GitHub App installation token is not a user and `/user` returns 403
+        for it. That is reported as its own error rather than an auth failure:
+        the App path is expected to have direct write access, so needing a fork
+        means something is misconfigured, and saying "authentication failed"
+        would send the reader after the wrong problem.
+        """
+        try:
+            body = (await self._request("GET", "/user")).json()
+        except GitHostingError as exc:
+            raise GitHostingError(
+                PublishErrorCode.IDENTITY_UNKNOWN,
+                "Could not determine which GitHub account this credential acts "
+                "as, so a fork cannot be located. A GitHub App installation "
+                "token has no user account and can only publish to "
+                f"repositories the App is installed on. ({exc})",
+            ) from exc
+        login = str(body.get("login") or "")
+        return AuthenticatedUser(login=login)
+
+    async def find_fork(
+        self, *, owner: str, repo: str, user: str
+    ) -> RepositoryInfo | None:
+        """``user``'s fork of ``owner/repo``, if it exists.
+
+        Looks the fork up by its conventional name first, which is one request
+        instead of paging every fork of a popular repository. The parent is
+        then checked, because a same-named repository owned by the user is not
+        necessarily a fork of this upstream -- publishing into an unrelated
+        repository of theirs would be a surprising thing to do on their behalf.
+        """
+        client = await self._http()
+        response = await client.get(
+            f"/repos/{user}/{repo}", headers=await self._headers()
         )
+        if response.status_code == 404:
+            return None
+        _raise_for_status(response)
+        candidate = _repository(response.json(), user, repo)
+
+        upstream = f"{owner}/{repo}".lower()
+        if candidate.fork and (candidate.parent_full_name or "").lower() == upstream:
+            return candidate
+        if not candidate.fork:
+            log.info(
+                "publish.fork_name_taken",
+                repository=candidate.full_name,
+                reason="exists but is not a fork of the upstream",
+            )
+        return None
+
+    async def create_fork(self, *, owner: str, repo: str) -> RepositoryInfo:
+        """Fork ``owner/repo`` to the authenticated account.
+
+        GitHub answers 202 and copies in the background, so the repository this
+        returns may not be usable yet; the caller polls.
+        """
+        try:
+            response = await self._request("POST", f"/repos/{owner}/{repo}/forks")
+        except GitHostingError as exc:
+            raise GitHostingError(
+                PublishErrorCode.FORK_CREATE_FAILED,
+                f"GitHub refused to fork {owner}/{repo}. {exc}",
+            ) from exc
+        body = response.json() if response.content else {}
+        full = str(body.get("full_name") or "")
+        fork_owner, _, fork_repo = full.partition("/")
+        return _repository(body, fork_owner or "", fork_repo or repo)
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
         body = (
@@ -191,13 +263,21 @@ class GitHubAdapter:
         commit_message: str,
         author_name: str,
         author_email: str,
+        source_owner: str | None = None,
+        source_repo: str | None = None,
+        protected_default_branch: str | None = None,
     ) -> str:
         """Apply the approved patch on a fresh branch and push it.
 
         Runs in a temporary clone that is deleted afterwards, so nothing about
         one publication can influence the next.
+
+        The base commit is read from ``source_owner/source_repo`` and the branch
+        is pushed to ``owner/repo``. They are the same repository for direct
+        publication and differ for a fork, where the reviewed commit lives
+        upstream and only the branch belongs to the fork.
         """
-        ensure_pushable(branch)
+        ensure_pushable(branch, default_branch=protected_default_branch)
         token = await self._credentials.bearer_token()
         workdir = Path(tempfile.mkdtemp(prefix="patchpilot-publish-"))
         try:
@@ -213,12 +293,31 @@ class GitHubAdapter:
                 author_name,
                 author_email,
                 token,
+                source_owner or owner,
+                source_repo or repo,
+                protected_default_branch,
             )
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
 
 # --------------------------------------------------------------------- helpers
+
+
+def _repository(body: dict[str, Any], owner: str, repo: str) -> RepositoryInfo:
+    parent = body.get("parent")
+    return RepositoryInfo(
+        full_name=body.get("full_name", f"{owner}/{repo}"),
+        default_branch=body.get("default_branch", "main"),
+        private=bool(body.get("private", False)),
+        html_url=body.get("html_url", f"https://github.com/{owner}/{repo}"),
+        permissions=body.get("permissions") or {},
+        fork=bool(body.get("fork", False)),
+        parent_full_name=(
+            str(parent.get("full_name")) if isinstance(parent, dict) and parent.get("full_name")
+            else None
+        ),
+    )
 
 
 def _pull_request(body: dict[str, Any]) -> PullRequestInfo:
@@ -308,21 +407,45 @@ def _apply_and_push(
     author_name: str,
     author_email: str,
     token: str,
+    source_owner: str,
+    source_repo: str,
+    protected_default_branch: str | None,
 ) -> str:
     """Clone, branch, apply, verify, commit, push. Returns the commit SHA.
 
     Synchronous by design and run on a worker thread: git is a subprocess, and
     interleaving these steps would make the verification meaningless.
     """
-    url = f"https://github.com/{owner}/{repo}.git"
+    push_url = f"https://github.com/{owner}/{repo}.git"
+    source_url = f"https://github.com/{source_owner}/{source_repo}.git"
 
     _git(workdir, "init", "--quiet")
-    _git(workdir, "remote", "add", "origin", url)
-    # Fetch only the approved base commit. The branch is created from the SHA
-    # the patch was reviewed against, never from whatever the default branch
-    # happens to point at now -- that is what keeps an approved patch applying
-    # to the tree it was approved for.
-    _git(workdir, "fetch", "--quiet", "--depth", "1", "origin", base_commit_sha, token=token)
+    _git(workdir, "remote", "add", "origin", push_url)
+    # Fetch only the approved base commit, from the repository that actually
+    # has it. For a fork that is upstream, not the fork: a fork created after
+    # the review may not contain the reviewed commit, and syncing it would risk
+    # moving the patch onto a different revision. Fetching the exact SHA from
+    # upstream sidesteps fork synchronisation entirely.
+    if source_url != push_url:
+        _git(workdir, "remote", "add", "upstream", source_url)
+        fetch_remote = "upstream"
+    else:
+        fetch_remote = "origin"
+    try:
+        _git(
+            workdir, "fetch", "--quiet", "--depth", "1", fetch_remote, base_commit_sha,
+            token=token,
+        )
+    except GitHostingError as exc:
+        raise GitHostingError(
+            PublishErrorCode.FORK_BASE_UNAVAILABLE
+            if fetch_remote == "upstream"
+            else PublishErrorCode.BASE_COMMIT_UNKNOWN,
+            f"The approved base commit {base_commit_sha[:12]} could not be fetched "
+            f"from {source_owner}/{source_repo}. It may have been garbage collected "
+            "after a force-push. The patch must be regenerated and reviewed against "
+            "a commit that still exists.",
+        ) from exc
     _git(workdir, "checkout", "--quiet", "-b", branch, "FETCH_HEAD")
 
     patch_file = workdir / ".patchpilot-approved.patch"
@@ -353,7 +476,10 @@ def _apply_and_push(
          "commit", "--quiet", "-m", commit_message)
     commit_sha = _git(workdir, "rev-parse", "HEAD").strip()
 
-    ensure_pushable(branch)
+    # Checked once more immediately before the push, against the default branch
+    # of the repository being written to. For a fork that is the fork's own
+    # default, which upstream's name would not have covered.
+    ensure_pushable(branch, default_branch=protected_default_branch)
     try:
         # No --force, ever. A rejected push means the branch already exists with
         # different content, which is someone else's work.

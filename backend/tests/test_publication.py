@@ -29,6 +29,7 @@ from patchpilot.publish.branch import (
 )
 from patchpilot.publish.identity import parse_repository
 from patchpilot.publish.ports import (
+    AuthenticatedUser,
     CheckRun,
     GitHostingError,
     GitHostingPort,
@@ -39,6 +40,7 @@ from patchpilot.review import service as review_service
 
 BASE_SHA = "a" * 40
 DRIFTED_SHA = "b" * 40
+UPSTREAM_OWNER = "external-owner"
 PATCH = (
     "diff --git a/sqlparse/sql.py b/sqlparse/sql.py\n"
     "--- a/sqlparse/sql.py\n"
@@ -61,6 +63,12 @@ class FakeHost:
         existing_branches: set[str] | None = None,
         fail_push: GitHostingError | None = None,
         fail_pr: GitHostingError | None = None,
+        can_push: bool = True,
+        user: str = "test-user",
+        existing_forks: set[str] | None = None,
+        fork_ready_after: int = 0,
+        fail_fork: GitHostingError | None = None,
+        fork_default_branch: str | None = None,
     ) -> None:
         self._configured = configured
         self.default_branch = default_branch
@@ -73,18 +81,81 @@ class FakeHost:
         self.pull_requests: dict[str, PullRequestInfo] = {}
         self._next_pr = 842
 
+        # -- fork behaviour --------------------------------------------------
+        self.can_push = can_push
+        """Whether the credential may push to *upstream*. False drives FORK."""
+        self.user = user
+        self.existing_forks = existing_forks or set()
+        """Full names, e.g. {"test-user/example-project"}, that already exist."""
+        self.fork_ready_after = fork_ready_after
+        """How many get_repository calls a freshly created fork 404s for, so
+        GitHub's asynchronous fork creation can be exercised deterministically."""
+        self.fail_fork = fail_fork
+        self.fork_default_branch = fork_default_branch or default_branch
+        self.forks_created: list[str] = []
+        self._pending_ready: dict[str, int] = {}
+
+    def _is_fork(self, owner: str, repo: str) -> bool:
+        return f"{owner}/{repo}" in self.existing_forks
+
     @property
     def configured(self) -> bool:
         return self._configured
 
     async def get_repository(self, owner: str, repo: str) -> RepositoryInfo:
         self.calls.append("get_repository")
+        full = f"{owner}/{repo}"
+
+        remaining = self._pending_ready.get(full, 0)
+        if remaining > 0:
+            self._pending_ready[full] = remaining - 1
+            raise GitHostingError(PublishErrorCode.REPOSITORY_UNKNOWN, "not ready yet")
+
+        if self._is_fork(owner, repo):
+            return RepositoryInfo(
+                full_name=full,
+                default_branch=self.fork_default_branch,
+                private=False,
+                html_url=f"https://github.com/{full}",
+                permissions={"push": True},
+                fork=True,
+                parent_full_name=f"{UPSTREAM_OWNER}/{repo}",
+            )
         return RepositoryInfo(
-            full_name=f"{owner}/{repo}",
+            full_name=full,
             default_branch=self.default_branch,
             private=False,
-            html_url=f"https://github.com/{owner}/{repo}",
+            html_url=f"https://github.com/{full}",
+            permissions={"push": self.can_push},
+        )
+
+    async def get_authenticated_user(self) -> AuthenticatedUser:
+        self.calls.append("get_authenticated_user")
+        return AuthenticatedUser(login=self.user)
+
+    async def find_fork(self, *, owner: str, repo: str, user: str) -> RepositoryInfo | None:
+        self.calls.append("find_fork")
+        if f"{user}/{repo}" not in self.existing_forks:
+            return None
+        return await self.get_repository(user, repo)
+
+    async def create_fork(self, *, owner: str, repo: str) -> RepositoryInfo:
+        self.calls.append("create_fork")
+        if self.fail_fork is not None:
+            raise self.fail_fork
+        full = f"{self.user}/{repo}"
+        self.forks_created.append(full)
+        self.existing_forks.add(full)
+        if self.fork_ready_after:
+            self._pending_ready[full] = self.fork_ready_after
+        return RepositoryInfo(
+            full_name=full,
+            default_branch=self.fork_default_branch,
+            private=False,
+            html_url=f"https://github.com/{full}",
             permissions={"push": True},
+            fork=True,
+            parent_full_name=f"{owner}/{repo}",
         )
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:

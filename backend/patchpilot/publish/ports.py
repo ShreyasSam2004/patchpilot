@@ -40,6 +40,20 @@ class RepositoryInfo:
     private: bool
     html_url: str
     permissions: dict[str, bool] = field(default_factory=dict)
+    fork: bool = False
+    parent_full_name: str | None = None
+    """For a fork, the repository it was forked from. Used to confirm a
+    candidate fork really descends from the upstream we mean to publish to,
+    rather than an unrelated repository that happens to share its name."""
+
+    @property
+    def owner(self) -> str:
+        return self.full_name.split("/", 1)[0]
+
+    @property
+    def name(self) -> str:
+        _, _, tail = self.full_name.partition("/")
+        return tail
 
     @property
     def can_push(self) -> bool:
@@ -48,6 +62,18 @@ class RepositoryInfo:
         refusing to try would make the App path unusable. A real lack of access
         surfaces as PERMISSION_DENIED on the push itself."""
         return self.permissions.get("push", True)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedUser:
+    """Who the credential belongs to.
+
+    Needed to answer two questions a fork publication cannot proceed without:
+    whose fork to look for, and what to put on the left of ``user:branch`` in
+    the pull request head.
+    """
+
+    login: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +114,29 @@ class GitHostingPort(Protocol):
 
     async def get_repository(self, owner: str, repo: str) -> RepositoryInfo: ...
 
+    async def get_authenticated_user(self) -> AuthenticatedUser:
+        """The account the credential acts as. Raises if it cannot be resolved."""
+        ...
+
+    async def find_fork(
+        self, *, owner: str, repo: str, user: str
+    ) -> RepositoryInfo | None:
+        """``user``'s existing fork of ``owner/repo``, if there is one.
+
+        Consulted before creating anything, so a retry reuses the fork a
+        previous attempt made instead of asking GitHub for another one.
+        """
+        ...
+
+    async def create_fork(self, *, owner: str, repo: str) -> RepositoryInfo:
+        """Fork ``owner/repo`` to the authenticated account.
+
+        GitHub creates forks asynchronously, so the returned repository may not
+        be usable yet; callers wait via :meth:`get_repository` polling rather
+        than assuming readiness.
+        """
+        ...
+
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
         """Commit SHA a branch points at. Raises if the branch is absent."""
         ...
@@ -105,8 +154,22 @@ class GitHostingPort(Protocol):
         commit_message: str,
         author_name: str,
         author_email: str,
+        source_owner: str | None = None,
+        source_repo: str | None = None,
+        protected_default_branch: str | None = None,
     ) -> str:
         """Create ``branch`` at ``base_commit_sha``, apply ``patch``, push.
+
+        ``owner``/``repo`` is where the branch is *pushed*. ``source_owner``/
+        ``source_repo`` is where the base commit is *read from*, defaulting to
+        the push target.
+
+        The two differ for fork publication, and separating them is what keeps
+        the approved base exact: the reviewed commit lives upstream, and a fork
+        made afterwards may not contain it -- or may contain a newer default
+        branch. Fetching the base from upstream and pushing to the fork avoids
+        synchronising the fork at all, so nothing can quietly move the patch
+        onto a different revision.
 
         Returns the new commit SHA. Implementations must apply the patch
         verbatim and verify the resulting diff before pushing: the point of the
@@ -147,6 +210,7 @@ class GitHostingPort(Protocol):
 
 __all__ = [
     "Any",
+    "AuthenticatedUser",
     "CheckRun",
     "GitHostingError",
     "GitHostingPort",

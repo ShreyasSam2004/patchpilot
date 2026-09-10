@@ -488,8 +488,13 @@ class PublicationOut(BaseModel):
 
     state: str
     provider: str = "github"
+    strategy: str = "DIRECT"
+    """DIRECT or FORK. Informational: the backend decides it, never the user."""
     owner: str = ""
     repo: str = ""
+    head_owner: str | None = None
+    head_repo: str | None = None
+    """Where the branch lives. Differs from owner/repo only for a fork."""
     base_branch: str = ""
     base_commit_sha: str = ""
     observed_base_head: str | None = None

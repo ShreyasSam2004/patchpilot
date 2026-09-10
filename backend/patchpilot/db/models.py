@@ -18,7 +18,13 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from ..domain.enums import BenchmarkRunStatus, BenchmarkStatus, ReviewState, RunState
+from ..domain.enums import (
+    BenchmarkRunStatus,
+    BenchmarkStatus,
+    PublicationStrategy,
+    ReviewState,
+    RunState,
+)
 from ..ids import new_id
 
 
@@ -470,6 +476,17 @@ class PublicationRow(Base):
     """Where the base branch actually pointed when we published. Differs from
     :attr:`base_commit_sha` when the branch moved while the agent worked."""
     base_drifted: Mapped[bool] = mapped_column(sa.Boolean, default=False)
+
+    # -- strategy -----------------------------------------------------------
+    strategy: Mapped[str] = mapped_column(
+        sa.String(12), default=str(PublicationStrategy.DIRECT)
+    )
+    """DIRECT or FORK, decided from the credential's permissions."""
+    head_owner: Mapped[str | None] = mapped_column(sa.String(120), nullable=True)
+    head_repo: Mapped[str | None] = mapped_column(sa.String(120), nullable=True)
+    """Where the branch physically lives. Equal to owner/repo for DIRECT; the
+    authenticated user's fork for FORK. Kept separate from owner/repo so the
+    pull request target stays unambiguous on a retry."""
 
     # -- results ------------------------------------------------------------
     branch: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)

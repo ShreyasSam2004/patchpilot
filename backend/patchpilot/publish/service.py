@@ -30,6 +30,7 @@ from ..config import Settings, get_settings
 from ..db.models import PatchVersionRow, PublicationRow, Run
 from ..domain.enums import (
     PublicationStep,
+    PublicationStrategy,
     PublishErrorCode,
     ReviewAction,
     ReviewState,
@@ -42,6 +43,7 @@ from .branch import branch_name, collision_name, ensure_pushable
 from .github import GitHubAdapter
 from .identity import RepositoryIdentity, parse_repository
 from .ports import GitHostingError, GitHostingPort
+from .strategy import PublicationTarget, select_target
 
 log = get_logger(__name__)
 
@@ -338,6 +340,26 @@ class PublicationService:
         publication.base_commit_sha = run.base_commit
         await self._record(session, publication, PublicationStep.RESOLVED_REPOSITORY)
 
+        # 2b. Direct or fork? Decided from the credential's permissions, before
+        #     anything is written. A retry that already resolved a fork reuses
+        #     the recorded one rather than asking GitHub again.
+        try:
+            target = await self._target(publication, identity)
+        except GitHostingError as exc:
+            return await self._fail(session, run, publication, exc.code, str(exc))
+        publication.strategy = str(target.strategy)
+        publication.head_owner = target.head_owner
+        publication.head_repo = target.head_repo
+        await self._record(session, publication, PublicationStep.SELECTED_STRATEGY)
+        if target.is_fork:
+            await self._record(session, publication, PublicationStep.RESOLVED_FORK)
+            log.info(
+                "publish.strategy",
+                run_id=run.id, strategy=str(target.strategy),
+                head=f"{target.head_owner}/{target.head_repo}",
+                upstream=f"{target.upstream_owner}/{target.upstream_repo}",
+            )
+
         # 3. Base drift. We do not rebase and we do not rewrite the patch: the
         #    branch is cut from the commit the patch was reviewed against, so
         #    approved content stays byte-identical. Drift is recorded, surfaced
@@ -354,22 +376,28 @@ class PublicationService:
         await self._record(session, publication, PublicationStep.CHECKED_DRIFT)
 
         # 4. A branch we are allowed to write.
-        branch = publication.branch or await self._free_branch(run, identity)
-        ensure_pushable(branch, default_branch=repository.default_branch)
+        branch = publication.branch or await self._free_branch(run, target)
+        # Guarded against the default branch of whichever repository is being
+        # written to -- upstream's for direct, the fork's own for a fork.
+        ensure_pushable(branch, default_branch=target.head_default_branch)
+        ensure_pushable(branch, default_branch=target.upstream_default_branch)
         publication.branch = branch
 
         # 5. Apply, verify, commit, push. The adapter re-derives the diff after
         #    applying and refuses to push if it differs from the approved bytes.
         if not publication.has_completed(str(PublicationStep.BRANCH_PUSHED)):
             commit_sha = await self.host.push_branch(
-                owner=identity.owner,
-                repo=identity.repo,
+                owner=target.head_owner,
+                repo=target.head_repo,
                 branch=branch,
                 base_commit_sha=run.base_commit,
                 patch=version.diff,
                 commit_message=commit_message(run, version),
                 author_name=self.settings.github_commit_author_name,
                 author_email=self.settings.github_commit_author_email,
+                source_owner=target.upstream_owner,
+                source_repo=target.upstream_repo,
+                protected_default_branch=target.head_default_branch,
             )
             await self._record(
                 session, publication, PublicationStep.APPLIED_PATCH
@@ -395,13 +423,16 @@ class PublicationService:
 
         # 6. The pull request. Adopt an existing one if a previous attempt got
         #    this far but lost the response.
+        head_ref = target.head_ref(branch)
         existing_pr = await self.host.find_pull_request(
-            owner=identity.owner, repo=identity.repo, head=branch
+            owner=target.upstream_owner, repo=target.upstream_repo, head=head_ref
         )
         pull = existing_pr or await self.host.create_pull_request(
-            owner=identity.owner,
-            repo=identity.repo,
-            head=branch,
+            # Always upstream, never the fork: a fork-to-fork pull request would
+            # be invisible to the maintainers the change is meant for.
+            owner=target.upstream_owner,
+            repo=target.upstream_repo,
+            head=head_ref,
             base=base_branch,
             title=pull_request_title(run),
             body=pull_request_body(run, version, publication),
@@ -427,8 +458,38 @@ class PublicationService:
         log.info("publish.pr_created", run_id=run.id, pr=pull.number, branch=branch)
         return publication
 
-    async def _free_branch(self, run: Run, identity: RepositoryIdentity) -> str:
-        """A branch name that does not already exist.
+    async def _target(
+        self, publication: PublicationRow, identity: RepositoryIdentity
+    ) -> PublicationTarget:
+        """Where this publication writes, reusing what a previous attempt found.
+
+        Re-deciding on every retry would ask GitHub to fork again after a
+        failure between the fork call and the push. The recorded head is
+        authoritative once it exists.
+        """
+        recorded = publication.head_owner and publication.head_repo
+        if recorded and publication.has_completed(str(PublicationStep.SELECTED_STRATEGY)):
+            strategy = PublicationStrategy(publication.strategy or str(PublicationStrategy.DIRECT))
+            upstream = await self.host.get_repository(identity.owner, identity.repo)
+            head_default = upstream.default_branch
+            if strategy is PublicationStrategy.FORK:
+                fork = await self.host.get_repository(
+                    str(publication.head_owner), str(publication.head_repo)
+                )
+                head_default = fork.default_branch
+            return PublicationTarget(
+                strategy=strategy,
+                upstream_owner=identity.owner,
+                upstream_repo=identity.repo,
+                upstream_default_branch=upstream.default_branch,
+                head_owner=str(publication.head_owner),
+                head_repo=str(publication.head_repo),
+                head_default_branch=head_default,
+            )
+        return await select_target(self.host, owner=identity.owner, repo=identity.repo)
+
+    async def _free_branch(self, run: Run, target: PublicationTarget) -> str:
+        """A branch name that does not already exist in the head repository.
 
         Suffixes on collision instead of reusing or force-pushing: an existing
         branch of the same name may be an earlier publication whose PR is still
@@ -439,7 +500,9 @@ class PublicationService:
         )
         for attempt in range(_MAX_BRANCH_ATTEMPTS):
             candidate = collision_name(base, attempt)
-            if not await self.host.branch_exists(identity.owner, identity.repo, candidate):
+            if not await self.host.branch_exists(
+                target.head_owner, target.head_repo, candidate
+            ):
                 return candidate
         raise GitHostingError(
             PublishErrorCode.BRANCH_EXISTS,
