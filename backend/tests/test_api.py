@@ -712,7 +712,14 @@ async def test_historical_versions_stay_inspectable(client, app_settings) -> Non
 
 async def test_no_generic_git_endpoint_is_exposed(client) -> None:
     """The frontend may only invoke named domain actions."""
-    spec = (await client.get("/openapi.json")).json()
-    paths = " ".join(spec.get("paths", {}))
+    spec = (await client.get("/api/openapi.json")).json()
+    paths = spec.get("paths", {})
+    # Guard the guard: an empty document would make every assertion below
+    # vacuously true, which is exactly how this test first passed against the
+    # wrong URL.
+    assert len(paths) > 10, "the OpenAPI document should list the real API"
+    assert "/api/runs/{run_id}/review/approve" in paths
+
+    joined = " ".join(paths)
     for forbidden in ("execute", "git-command", "shell", "merge"):
-        assert forbidden not in paths
+        assert forbidden not in joined
