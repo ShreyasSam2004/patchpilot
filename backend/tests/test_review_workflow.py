@@ -355,3 +355,46 @@ async def test_the_audit_trail_records_every_decision(session) -> None:
     assert audit[1].feedback == "More."
     assert audit[1].actor == "alice"
     assert audit[-1].patch_digest == patch_digest(REVISED_FIX)
+
+
+# --- the base commit publication depends on -------------------------------
+
+
+async def test_the_prepared_revision_is_recorded_on_the_run(session) -> None:
+    """A URL run without a pinned commit must still record what it prepared.
+
+    Publication applies the approved patch to a known revision. Without this the
+    run reaches PATCH_READY, the reviewer can approve, and publication then has
+    nowhere to apply the patch — which is exactly what happened to the first
+    real integration run.
+    """
+    from patchpilot.runs import service as run_service
+
+    run = make_run(id="run-base-1", code="R100", base_commit=None)
+    run.base_branch = None
+    session.add(run)
+    await session.flush()
+
+    result = make_result(REAL_FIX)
+    result.base_commit = "e" * 40
+    result.base_branch = "main"
+    await run_service.apply_result(session, run.id, result)
+
+    assert run.base_commit == "e" * 40
+    assert run.base_branch == "main"
+
+
+async def test_an_explicitly_pinned_commit_is_never_overwritten(session) -> None:
+    """A caller who pinned a base commit meant it."""
+    from patchpilot.runs import service as run_service
+
+    pinned = "d" * 40
+    run = make_run(id="run-base-2", code="R101", base_commit=pinned)
+    session.add(run)
+    await session.flush()
+
+    result = make_result(REAL_FIX)
+    result.base_commit = "f" * 40  # what the workspace happened to resolve
+    await run_service.apply_result(session, run.id, result)
+
+    assert run.base_commit == pinned

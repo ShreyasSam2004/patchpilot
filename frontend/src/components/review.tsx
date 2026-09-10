@@ -311,22 +311,31 @@ export function ReviewPanel({
                   </Button>
                   <Button
                     variant="primary"
-                    disabled={disabled || !review.can_approve || !review.publishing_available}
+                    disabled={disabled || !review.can_approve}
                     onClick={() => onApprove(feedback)}
-                    title={review.publishing_unavailable_reason ?? undefined}
                   >
-                    {busy === "approve" ? "Approving…" : "Approve & Create PR"}
+                    {busy === "approve"
+                      ? "Approving…"
+                      : review.publishing_available
+                        ? "Approve & Create PR"
+                        : "Approve patch"}
                   </Button>
                 </div>
+                {/* Approval and publication are separate steps, so an
+                    unpublishable run can still be approved — it simply waits.
+                    Blocking the decision would strand the workflow on a
+                    configuration problem. */}
                 {!review.publishing_available && (
                   <p className="text-[12px] text-[var(--color-warn)]">
-                    {review.publishing_unavailable_reason} — you can still review and
-                    request revisions; only publication is unavailable.
+                    {review.publishing_unavailable_reason} Approving records your
+                    decision; the branch and pull request can be created once that is
+                    resolved.
                   </p>
                 )}
                 <p className="text-[11px] text-[var(--text-muted)]">
-                  Approving creates a branch, commit and pull request from this exact
-                  patch. It does not merge anything.
+                  {review.publishing_available
+                    ? "Approving creates a branch, commit and pull request from this exact patch. It does not merge anything."
+                    : "Approving binds your decision to this exact patch. Nothing is published yet."}
                 </p>
               </div>
             )}
@@ -334,6 +343,11 @@ export function ReviewPanel({
             {(state === "APPROVED" || state === "PUBLISH_FAILED") && (
               <div className="space-y-2">
                 {error && <p className="text-[12px] text-[var(--color-bad)]">{error}</p>}
+                {!review.publishing_available && (
+                  <p className="text-[12px] text-[var(--color-warn)]">
+                    {review.publishing_unavailable_reason}
+                  </p>
+                )}
                 <p className="text-[12px] text-[var(--text-muted)]">
                   Approved{review.approved_by ? ` by ${review.approved_by}` : ""}
                   {review.approved_at
@@ -341,7 +355,12 @@ export function ReviewPanel({
                     : ""}
                   .
                 </p>
-                <Button variant="primary" disabled={disabled} onClick={onPublish}>
+                <Button
+                  variant="primary"
+                  disabled={disabled || !review.publishing_available}
+                  onClick={onPublish}
+                  title={review.publishing_unavailable_reason ?? undefined}
+                >
                   {busy === "publish"
                     ? "Publishing…"
                     : state === "PUBLISH_FAILED"

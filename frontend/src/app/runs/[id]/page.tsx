@@ -67,6 +67,7 @@ export default function RunPage() {
   const [loading, setLoading] = useState(true);
 
   const lastSeq = useRef(0);
+  const tabChosen = useRef(false);
   const live = run !== null && !isTerminal(run.state);
 
   const loadDetails = useCallback(async () => {
@@ -86,6 +87,12 @@ export default function RunPage() {
       setFiles(f);
       setHypotheses(h);
       setReview(r);
+      // A run waiting on a person should open on the decision, not bury it
+      // behind a tab they have to notice. Only ever done automatically once,
+      // and never over a tab the user chose themselves.
+      if (r?.review_state === "PATCH_READY" && !tabChosen.current) {
+        setTab("review");
+      }
     } catch {
       /* panels are secondary; the run header and timeline still render */
     }
@@ -370,7 +377,10 @@ export default function RunPage() {
           >
             <Tabs<Tab>
               active={tab}
-              onChange={setTab}
+              onChange={(next) => {
+                tabChosen.current = true;
+                setTab(next);
+              }}
               tabs={[
                 { id: "overview", label: "Overview" },
                 ...(review?.current

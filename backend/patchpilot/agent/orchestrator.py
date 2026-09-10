@@ -254,6 +254,11 @@ class AgentOrchestrator:
     async def _prepare(self) -> None:
         await self._set_state(RunState.PREPARING)
         info = await self.workspace.info()
+        # Pin the revision this run is actually working from. Without it a
+        # patch cannot be published later: there is no known base to apply it
+        # to, only "whatever the branch happened to be".
+        self.result.base_commit = self.task.base_commit or info.head
+        self.result.base_branch = info.branch
         await self.emitter.repository_ready(
             repository=self.task.repository,
             head=info.head,

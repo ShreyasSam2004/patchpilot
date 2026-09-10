@@ -220,6 +220,14 @@ class AgentResult:
     failure_class: FailureClass | None = None
     stop_reason: str = ""
     error: str | None = None
+    base_commit: str | None = None
+    """The commit the workspace was actually prepared at.
+
+    Recorded even when the caller did not pin one, because publication needs a
+    concrete revision: a patch reviewed against "whatever HEAD was that day"
+    cannot be applied to a known base later.
+    """
+    base_branch: str | None = None
     patch_assessment: PatchAssessment = field(default_factory=lambda: assess_patch(""))
     """What the final diff actually is, judged from the diff itself."""
     agent_claimed_resolved: bool = False

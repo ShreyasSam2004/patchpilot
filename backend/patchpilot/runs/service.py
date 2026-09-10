@@ -200,6 +200,13 @@ async def apply_result(session: AsyncSession, run_id: str, result: AgentResult) 
     run.metrics = result.metrics.to_dict()
     run.finished_at = result.finished_at or datetime.now(UTC)
 
+    # Record the revision actually prepared, so the patch can be published
+    # against a known base. Never overwrite a commit the caller pinned.
+    if result.base_commit and not run.base_commit:
+        run.base_commit = result.base_commit
+    if result.base_branch and not run.base_branch:
+        run.base_branch = result.base_branch
+
     # Offer the patch for human review. Returns None when there is nothing
     # worth reviewing, in which case the run never enters the review workflow.
     await review_service.record_generated_patch(session, run, result)
