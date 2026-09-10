@@ -91,6 +91,7 @@ class FakeHost:
         """How many get_repository calls a freshly created fork 404s for, so
         GitHub's asynchronous fork creation can be exercised deterministically."""
         self.fail_fork = fail_fork
+        self.unresolvable_refs: set[str] = set()
         self.fork_default_branch = fork_default_branch or default_branch
         self.forks_created: list[str] = []
         self._pending_ready: dict[str, int] = {}
@@ -165,6 +166,15 @@ class FakeHost:
     async def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         self.calls.append("branch_exists")
         return branch in self.existing_branches
+
+    async def resolve_commit(self, owner: str, repo: str, ref: str) -> str:
+        self.calls.append("resolve_commit")
+        if self.unresolvable_refs and ref in self.unresolvable_refs:
+            raise GitHostingError(
+                PublishErrorCode.BASE_COMMIT_UNKNOWN, f"no commit {ref}"
+            )
+        # Abbreviations expand to the full SHA they name, as GitHub does.
+        return ref if len(ref) == 40 else ref + "0" * (40 - len(ref))
 
     async def push_branch(self, **kwargs: object) -> str:
         self.calls.append("push_branch")

@@ -52,6 +52,19 @@ log = get_logger(__name__)
 _MAX_BRANCH_ATTEMPTS = 5
 
 
+def _has_drifted(head: str | None, approved: str | None) -> bool:
+    """Whether the base branch moved away from the approved commit.
+
+    Compared by prefix because the two are not always the same length: a run
+    may have pinned an abbreviated SHA, and a plain inequality would then call
+    every publication drifted while pointing at the very same commit.
+    """
+    if not head or not approved:
+        return False
+    shorter = min(len(head), len(approved))
+    return head[:shorter].lower() != approved[:shorter].lower()
+
+
 def _issue_number(run: Run) -> str | None:
     """Issue number from the URL the user supplied, never from issue prose."""
     if not run.issue_url:
@@ -334,10 +347,29 @@ class PublicationService:
 
         repository = await self.host.get_repository(identity.owner, identity.repo)
         base_branch = publication.base_branch or run.base_branch or repository.default_branch
+
+        # Expand an abbreviated base commit. Older runs recorded whatever the
+        # caller typed, and `git fetch <remote> 86112e6` fails outright -- the
+        # wire protocol wants all 40 characters. The short and full forms name
+        # the same commit, so this resolves rather than changes the revision.
+        base_commit = run.base_commit
+        if len(base_commit) < 40:
+            try:
+                base_commit = await self.host.resolve_commit(
+                    identity.owner, identity.repo, base_commit
+                )
+            except GitHostingError as exc:
+                return await self._fail(
+                    session, run, publication, PublishErrorCode.BASE_COMMIT_UNKNOWN,
+                    f"The recorded base commit {run.base_commit} could not be resolved "
+                    f"in {identity.owner}/{identity.repo}. {exc}",
+                )
+            run.base_commit = base_commit
+
         publication.owner = identity.owner
         publication.repo = identity.repo
         publication.base_branch = base_branch
-        publication.base_commit_sha = run.base_commit
+        publication.base_commit_sha = base_commit
         await self._record(session, publication, PublicationStep.RESOLVED_REPOSITORY)
 
         # 2b. Direct or fork? Decided from the credential's permissions, before
@@ -365,7 +397,7 @@ class PublicationService:
         #    approved content stays byte-identical. Drift is recorded, surfaced
         #    in the UI and noted in the PR, and GitHub shows any conflict.
         head = await self.host.get_branch_head(identity.owner, identity.repo, base_branch)
-        drifted = bool(head and head != run.base_commit)
+        drifted = _has_drifted(head, base_commit)
         publication.observed_base_head = head
         publication.base_drifted = drifted
         if drifted:
@@ -390,7 +422,7 @@ class PublicationService:
                 owner=target.head_owner,
                 repo=target.head_repo,
                 branch=branch,
-                base_commit_sha=run.base_commit,
+                base_commit_sha=base_commit,
                 patch=version.diff,
                 commit_message=commit_message(run, version),
                 author_name=self.settings.github_commit_author_name,
@@ -410,7 +442,7 @@ class PublicationService:
             await review_service.record_audit(
                 session, run, ReviewAction.BRANCH_CREATED, version=version.version,
                 actor=actor, digest=publication.patch_digest,
-                detail={"branch": branch, "base": run.base_commit},
+                detail={"branch": branch, "base": base_commit},
             )
             await review_service.record_audit(
                 session, run, ReviewAction.COMMIT_CREATED, version=version.version,

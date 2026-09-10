@@ -188,6 +188,16 @@ class GitHubAdapter:
         _raise_for_status(response)
         return True
 
+    async def resolve_commit(self, owner: str, repo: str, ref: str) -> str:
+        body = (await self._request("GET", f"/repos/{owner}/{repo}/commits/{ref}")).json()
+        full = str(body.get("sha") or "")
+        if not full:
+            raise GitHostingError(
+                PublishErrorCode.BASE_COMMIT_UNKNOWN,
+                f"{owner}/{repo} does not have a commit {ref}.",
+            )
+        return full
+
     async def get_check_runs(self, *, owner: str, repo: str, ref: str) -> list[CheckRun]:
         try:
             body = (

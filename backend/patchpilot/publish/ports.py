@@ -143,6 +143,16 @@ class GitHostingPort(Protocol):
 
     async def branch_exists(self, owner: str, repo: str, branch: str) -> bool: ...
 
+    async def resolve_commit(self, owner: str, repo: str, ref: str) -> str:
+        """Expand a commit-ish to its full 40-character SHA.
+
+        Needed because `git fetch <remote> <sha>` requires the whole thing, and
+        an abbreviated SHA is a perfectly reasonable thing for a person to have
+        pinned. Resolving is not a change of revision: the full and short forms
+        name the same commit.
+        """
+        ...
+
     async def push_branch(
         self,
         *,

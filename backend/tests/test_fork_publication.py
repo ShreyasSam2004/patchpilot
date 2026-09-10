@@ -593,3 +593,78 @@ def test_the_head_ref_is_qualified_only_for_forks() -> None:
     assert fork.head_ref("patchpilot/x") == "u:patchpilot/x"
     assert "fork publication" in fork.describe()
     assert "direct publication" in direct.describe()
+
+
+# --- abbreviated base commits -------------------------------------------------
+
+
+def test_an_abbreviation_is_not_mistaken_for_drift() -> None:
+    """`86112e6` and its full SHA are the same commit.
+
+    A plain inequality called every such publication drifted while pointing at
+    the very commit it was approved against.
+    """
+    from patchpilot.publish.service import _has_drifted
+
+    full = "86112e6" + "a" * 33
+    assert _has_drifted(full, "86112e6") is False
+    assert _has_drifted(full, full) is False
+    assert _has_drifted(full, "268615a") is True
+    assert _has_drifted(full, None) is False
+    assert _has_drifted(None, full) is False
+
+
+async def test_an_abbreviated_base_commit_is_expanded_before_use(
+    session, db_settings
+) -> None:
+    """`git fetch <remote> 86112e6` fails: the protocol wants all 40 characters.
+
+    The run recorded what the caller typed, so publication expands it. Resolving
+    is not a change of revision -- both forms name the same commit -- and the
+    push must receive the full SHA.
+    """
+    run = await _external_run(session, db_settings, run_id="fork-16")
+    run.base_commit = "86112e6"
+    await session.flush()
+    await _approve(session, run)
+
+    host = FakeHost(can_push=False, user=USER, head="86112e6" + "0" * 33)
+    publication = await _publish(session, db_settings, host, run)
+
+    assert "resolve_commit" in host.calls
+    assert len(publication.base_commit_sha) == 40
+    assert publication.base_commit_sha.startswith("86112e6")
+    assert len(host.pushed[0]["base_commit_sha"]) == 40
+    assert publication.base_drifted is False, "the same commit is not drift"
+    assert publication.pr_number is not None
+
+
+async def test_a_full_base_commit_is_left_alone(session, db_settings) -> None:
+    """No extra request when there is nothing to resolve."""
+    run = await _external_run(session, db_settings, run_id="fork-17")
+    await _approve(session, run)
+
+    host = FakeHost(can_push=False, user=USER)
+    publication = await _publish(session, db_settings, host, run)
+
+    assert "resolve_commit" not in host.calls
+    assert publication.base_commit_sha == BASE_SHA
+
+
+async def test_a_base_commit_that_no_longer_exists_stops_publication(
+    session, db_settings
+) -> None:
+    """Force-pushed away upstream. Guessing a replacement would change what was
+    approved, so this stops and says so."""
+    run = await _external_run(session, db_settings, run_id="fork-18")
+    run.base_commit = "deadbee"
+    await session.flush()
+    await _approve(session, run)
+
+    host = FakeHost(can_push=False, user=USER)
+    host.unresolvable_refs = {"deadbee"}
+    publication = await _publish(session, db_settings, host, run)
+
+    assert publication.error_code == str(PublishErrorCode.BASE_COMMIT_UNKNOWN)
+    assert host.pushed == []
+    assert publication.pr_number is None

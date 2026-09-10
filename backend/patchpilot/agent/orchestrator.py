@@ -257,7 +257,12 @@ class AgentOrchestrator:
         # Pin the revision this run is actually working from. Without it a
         # patch cannot be published later: there is no known base to apply it
         # to, only "whatever the branch happened to be".
-        self.result.base_commit = self.task.base_commit or info.head
+        # The *resolved* head, not what the caller typed. A caller may pin an
+        # abbreviated SHA -- "86112e6" is a perfectly good thing to paste into a
+        # form -- but `git fetch <remote> <sha>` needs the full 40 characters,
+        # and comparing an abbreviation against a full head reports drift that
+        # is not there. `info.head` is the same commit, unambiguously.
+        self.result.base_commit = info.head or self.task.base_commit
         self.result.base_branch = info.branch
         await self.emitter.repository_ready(
             repository=self.task.repository,
