@@ -359,5 +359,48 @@ def _apply_and_push(
         # different content, which is someone else's work.
         _git(workdir, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", token=token)
     except GitHostingError as exc:
-        raise GitHostingError(PublishErrorCode.PUSH_FAILED, _scrub(str(exc))[:300]) from exc
+        raise _classify_push_failure(exc) from exc
     return commit_sha
+
+
+def _classify_push_failure(exc: GitHostingError) -> GitHostingError:
+    """Turn a raw git push failure into something the user can act on.
+
+    A 403 here is almost always a token permission, not a broken integration:
+    the credential authenticated (GitHub names the account in the message) and
+    was then refused. The REST API is no help in spotting it either -- on a
+    public repository `GET /repos/{owner}/{repo}` succeeds and reports the
+    *owner's* permissions, so it says `push: true` for a token that cannot push
+    at all. Saying so plainly saves the reader from re-checking everything that
+    is already correct.
+    """
+    text = _scrub(str(exc))
+    lowered = text.lower()
+
+    if "403" in text or "denied to" in lowered or "permission to" in lowered:
+        return GitHostingError(
+            PublishErrorCode.PERMISSION_DENIED,
+            "GitHub accepted the credential but refused the push. The token is "
+            "missing write access to this repository's contents. For a "
+            "fine-grained token, set Repository permissions -> Contents to "
+            "'Read and write', and make sure this repository is in the token's "
+            "selected repositories. Classic tokens need the 'repo' scope.",
+        )
+    if "401" in text or "invalid credentials" in lowered or "authentication failed" in lowered:
+        return GitHostingError(
+            PublishErrorCode.AUTH_FAILED,
+            "GitHub rejected the credential. Check the token has not expired "
+            "and was copied in full.",
+        )
+    if "protected branch" in lowered or "pre-receive hook declined" in lowered:
+        return GitHostingError(
+            PublishErrorCode.PROTECTED_BRANCH,
+            "The push was refused by a branch protection rule or a pre-receive hook.",
+        )
+    if "non-fast-forward" in lowered or "fetch first" in lowered:
+        return GitHostingError(
+            PublishErrorCode.BRANCH_EXISTS,
+            "That branch already exists with different content. PatchPilot never "
+            "force-pushes; delete or rename the branch, then retry.",
+        )
+    return GitHostingError(PublishErrorCode.PUSH_FAILED, text[:300])

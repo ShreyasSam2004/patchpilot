@@ -520,3 +520,61 @@ async def test_status_refresh_reads_checks_and_never_merges(session, db_settings
     assert names == ["lint", "unit-tests"]
     assert publication.pr_state == "open"
     assert "merge" not in " ".join(host.calls)
+
+
+# --- push failures must be actionable --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("git_error", "expected"),
+    [
+        (
+            "git push failed: remote: Permission to owner/repo.git denied to user. "
+            "fatal: The requested URL returned error: 403",
+            PublishErrorCode.PERMISSION_DENIED,
+        ),
+        ("git push failed: remote: invalid credentials", PublishErrorCode.AUTH_FAILED),
+        (
+            "git push failed: remote: error: GH006: Protected branch update failed",
+            PublishErrorCode.PROTECTED_BRANCH,
+        ),
+        (
+            "git push failed: ! [rejected] main -> main (non-fast-forward)",
+            PublishErrorCode.BRANCH_EXISTS,
+        ),
+        ("git push failed: could not resolve host", PublishErrorCode.PUSH_FAILED),
+    ],
+)
+def test_push_failures_are_classified(git_error: str, expected: PublishErrorCode) -> None:
+    """A 403 on push is a token permission, and should say so.
+
+    The REST API cannot reveal this: on a public repository `GET /repos/{o}/{r}`
+    reports the *owner's* permissions, so it happily says `push: true` for a
+    token that cannot push at all. The push is the only honest signal.
+    """
+    from patchpilot.publish.github import _classify_push_failure
+
+    classified = _classify_push_failure(GitHostingError(PublishErrorCode.UNKNOWN, git_error))
+    assert classified.code is expected
+
+
+def test_the_permission_message_names_the_setting_to_change() -> None:
+    from patchpilot.publish.github import _classify_push_failure
+
+    message = str(
+        _classify_push_failure(
+            GitHostingError(PublishErrorCode.UNKNOWN, "remote: Permission to x denied to y. 403")
+        )
+    )
+    assert "Contents" in message and "Read and write" in message
+    assert "selected repositories" in message
+
+
+def test_a_token_never_appears_in_a_push_error() -> None:
+    """Errors reach logs and the UI; a leaked credential there is permanent."""
+    from patchpilot.publish.github import _classify_push_failure, _scrub
+
+    leaked = "fatal: unable to access 'https://x-access-token:ghp_SECRETVALUE123@github.com/o/r'"
+    assert "ghp_SECRETVALUE123" not in _scrub(leaked)
+    classified = _classify_push_failure(GitHostingError(PublishErrorCode.UNKNOWN, leaked))
+    assert "ghp_SECRETVALUE123" not in str(classified)
