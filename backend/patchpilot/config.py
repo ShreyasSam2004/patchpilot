@@ -93,6 +93,24 @@ class Settings(BaseSettings):
     docker_network: str = "none"
     command_timeout_s: int = 300
 
+    # ---- github publication ------------------------------------------------
+    # Credentials live only in the backend. They are never placed in a prompt,
+    # a tool result, an event payload or an API response; `redacted()` reports
+    # presence, never value.
+    github_app_id: str | None = None
+    github_installation_id: str | None = None
+    github_app_private_key: str | None = None
+    github_app_private_key_path: str | None = None
+    github_token: str | None = None
+    """Personal access token. Development convenience; the App is the
+    production path."""
+    github_pr_draft: bool = False
+    github_link_issue: bool = False
+    """Whether the PR body may use closing keywords. Off by default so opening
+    a pull request never silently closes someone's issue."""
+    github_commit_author_name: str = "PatchPilot"
+    github_commit_author_email: str = "patchpilot@users.noreply.github.com"
+
     # ---- tools / mcp -------------------------------------------------------
     tool_allow: list[str] = [
         "list_files",
@@ -171,12 +189,22 @@ class Settings(BaseSettings):
 
     def redacted(self) -> dict[str, Any]:
         """Configuration safe to return from the API or write to a log."""
-        secret_fields = {"anthropic_api_key", "openai_api_key"}
+        secret_fields = {
+            "anthropic_api_key",
+            "openai_api_key",
+            "github_token",
+            "github_app_private_key",
+        }
         out: dict[str, Any] = {}
         for name in type(self).model_fields:
             value = getattr(self, name)
             if name in secret_fields:
-                out[name] = "set" if self.api_key_for(name.split("_")[0]) else None
+                # Presence only; the value never leaves the process. Provider
+                # keys also resolve their vendor env-var fallback, so a key set
+                # as ANTHROPIC_API_KEY still reports as configured.
+                provider = name.split("_")[0]
+                resolved = value or self.api_key_for(provider)
+                out[name] = "set" if resolved else None
             elif isinstance(value, Path):
                 out[name] = str(value)
             else:

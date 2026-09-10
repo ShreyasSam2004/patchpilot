@@ -20,9 +20,10 @@ from ..agent.session import SessionConfig, agent_session
 from ..config import Settings, get_settings
 from ..db.models import Run
 from ..db.session import session_scope
-from ..domain.enums import RunState
+from ..domain.enums import ReviewState, RunState
 from ..events.recorder import DatabaseSink
 from ..logging_setup import get_logger
+from ..review import service as review_service
 from ..runs import service as run_service
 from .queue import claim_next_benchmark, claim_next_run, heartbeat, requeue_stale_runs
 
@@ -118,7 +119,17 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
         if run is None:
             log.warning("worker.run_missing", run_id=run_id)
             return
-        task = _to_agent_task(run)
+
+        # A run coming back after "request revision" restarts from the patch the
+        # reviewer saw, not from an empty tree, so the agent refines the
+        # reviewed solution rather than rediscovering it.
+        seed = ""
+        if ReviewState(run.review_state) is ReviewState.REVISION_REQUESTED:
+            previous = await review_service.latest_version(session, run.id)
+            seed = previous.diff if previous else ""
+            await review_service.begin_revision(session, run)
+
+        task = _to_agent_task(run, seed_patch=seed)
         stored = run.config or {}
         image = stored.get("docker_image")
         config = SessionConfig(
@@ -181,8 +192,10 @@ async def _heartbeat_loop(run_id: str, orchestrator, settings: Settings) -> None
             log.warning("worker.heartbeat_failed", run_id=run_id, error=str(exc))
 
 
-def _to_agent_task(run: Run) -> AgentTask:
-    overrides = (run.config or {}).get("budget_overrides") or {}
+def _to_agent_task(run: Run, *, seed_patch: str = "") -> AgentTask:
+    config = run.config or {}
+    overrides = config.get("budget_overrides") or {}
+    feedback = str(config.get("reviewer_feedback") or "").strip()
     return AgentTask(
         run_id=run.id,
         issue=run.issue,
@@ -192,4 +205,31 @@ def _to_agent_task(run: Run) -> AgentTask:
         base_commit=run.base_commit,
         test_command=run.test_command,
         budget_overrides=overrides,
+        # Reviewer feedback arrives through the same `extra_guidance` seam the
+        # CLI uses for operator guidance, rather than a second injection path.
+        extra_guidance=reviewer_directive(feedback) if feedback else None,
+        # The previous patch is re-applied to the fresh workspace so a revision
+        # refines the reviewed solution instead of starting from nothing.
+        seed_patch=seed_patch or None,
+    )
+
+
+def reviewer_directive(feedback: str) -> str:
+    """Frame reviewer feedback as a revision brief for the agent.
+
+    Deliberately explicit that a patch already exists and was not approved:
+    without that framing the agent treats the feedback as a fresh issue and
+    re-derives a solution from scratch, discarding the part the reviewer
+    accepted.
+    """
+    return (
+        "REVIEWER FEEDBACK\n\n"
+        "Your previous proposed patch was reviewed by a human and was not "
+        "approved. It is already applied to this workspace, so you are editing "
+        "the reviewed solution rather than starting over.\n\n"
+        f"Reviewer feedback:\n{feedback}\n\n"
+        "Re-inspect the current implementation and the existing diff. Change "
+        "only what the feedback requires -- keep the parts that were not "
+        "criticised. Then run the relevant verification again and finish, so "
+        "the revised patch can go back for review."
     )

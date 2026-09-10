@@ -17,9 +17,11 @@ from ..agent.result import AgentResult
 from ..agent.session import SessionConfig
 from ..config import Settings, get_settings
 from ..db.models import Event, PatchRow, Run, TestRunRow, ToolCallRow
-from ..domain.enums import RunState
+from ..domain.enums import ReviewState, RunState
 from ..ids import new_id, short_code
 from ..logging_setup import get_logger
+from ..publish.identity import parse_repository
+from ..review import service as review_service
 
 log = get_logger(__name__)
 
@@ -60,6 +62,11 @@ async def create_run(
         if value
     }
 
+    # Fixed now, from the URL the user actually supplied. Deciding the push
+    # target later -- from issue text, a branch name, anything the model saw --
+    # is how an agent opens a pull request against the wrong repository.
+    identity = parse_repository(repo_url)
+
     run = Run(
         id=new_id(),
         code=short_code(),
@@ -76,6 +83,10 @@ async def create_run(
         sandbox=sandbox or settings.sandbox,
         config={**config.describe(settings), "budget_overrides": budget_overrides},
         state=str(RunState.PENDING),
+        review_state=str(ReviewState.RUNNING),
+        repo_provider=identity.provider if identity else None,
+        repo_owner=identity.owner if identity else None,
+        repo_name=identity.repo if identity else None,
         queued_at=datetime.now(UTC),
     )
     session.add(run)
@@ -188,6 +199,10 @@ async def apply_result(session: AsyncSession, run_id: str, result: AgentResult) 
     run.files_modified = result.files_modified
     run.metrics = result.metrics.to_dict()
     run.finished_at = result.finished_at or datetime.now(UTC)
+
+    # Offer the patch for human review. Returns None when there is nothing
+    # worth reviewing, in which case the run never enters the review workflow.
+    await review_service.record_generated_patch(session, run, result)
 
     if result.final_patch.strip():
         session.add(

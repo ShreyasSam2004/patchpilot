@@ -11,7 +11,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..db.models import BenchmarkRun, BenchmarkTask, Run
+from ..db.models import (
+    BenchmarkRun,
+    BenchmarkTask,
+    PatchVersionRow,
+    PublicationRow,
+    Run,
+)
 
 
 # --------------------------------------------------------------------- runs
@@ -92,6 +98,7 @@ class RunSummaryOut(BaseModel):
     files_modified: list[str] = []
     has_patch: bool = False
     is_benchmark_task: bool = False
+    review_state: str = "RUNNING"
 
     @classmethod
     def of(cls, run: Run) -> RunSummaryOut:
@@ -102,6 +109,7 @@ class RunSummaryOut(BaseModel):
             issue_title=run.issue_title or _first_line(run.issue),
             issue_url=run.issue_url,
             state=run.state,
+            review_state=run.review_state,
             summary=run.summary,
             provider=run.provider,
             model=run.model,
@@ -422,3 +430,138 @@ class FixtureOut(BaseModel):
 def _first_line(text: str, limit: int = 140) -> str:
     line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
     return line[:limit]
+
+
+# ------------------------------------------------------------------- review
+
+
+class PatchVersionOut(BaseModel):
+    """One patch offered for review. Versions are never overwritten."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    version: int
+    digest: str
+    files: list[str] = []
+    insertions: int = 0
+    deletions: int = 0
+    patch_quality: str = "no_patch"
+    verification: dict[str, Any] = {}
+    model: str = ""
+    iterations: int = 0
+    root_cause: str = ""
+    repair_summary: str = ""
+    decision: str | None = None
+    reviewer_feedback: str = ""
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    created_at: datetime
+    diff: str = ""
+
+    @classmethod
+    def of(cls, row: PatchVersionRow, *, include_diff: bool = False) -> PatchVersionOut:
+        return cls(
+            version=row.version,
+            digest=row.digest,
+            files=row.files or [],
+            insertions=row.insertions,
+            deletions=row.deletions,
+            patch_quality=row.patch_quality,
+            verification=row.verification or {},
+            model=row.model,
+            iterations=row.iterations,
+            root_cause=row.root_cause,
+            repair_summary=row.repair_summary,
+            decision=row.decision,
+            reviewer_feedback=row.reviewer_feedback,
+            decided_at=row.decided_at,
+            decided_by=row.decided_by,
+            created_at=row.created_at,
+            diff=row.diff if include_diff else "",
+        )
+
+
+class PublicationOut(BaseModel):
+    """What happened, or is happening, on GitHub."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    state: str
+    provider: str = "github"
+    owner: str = ""
+    repo: str = ""
+    base_branch: str = ""
+    base_commit_sha: str = ""
+    observed_base_head: str | None = None
+    base_drifted: bool = False
+    branch: str | None = None
+    commit_sha: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_state: str | None = None
+    checks: dict[str, Any] = {}
+    completed_steps: list[str] = []
+    error_code: str | None = None
+    error_detail: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def of(cls, row: PublicationRow) -> PublicationOut:
+        return cls.model_validate(row)
+
+
+class ReviewAuditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    action: str
+    patch_version: int | None = None
+    actor: str | None = None
+    feedback: str = ""
+    patch_digest: str | None = None
+    detail: dict[str, Any] = {}
+    created_at: datetime
+
+
+class ReviewOut(BaseModel):
+    """Everything the review screen needs in one request."""
+
+    run_id: str
+    code: str
+    repository: str
+    repo_owner: str | None = None
+    repo_name: str | None = None
+    base_branch: str | None = None
+    base_commit: str | None = None
+    issue_title: str | None = None
+    issue_url: str | None = None
+    model: str = ""
+    run_state: str
+    review_state: str
+    approved_patch_sha256: str | None = None
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    can_approve: bool = False
+    can_publish: bool = False
+    publishing_available: bool = False
+    publishing_unavailable_reason: str | None = None
+    current: PatchVersionOut | None = None
+    versions: list[PatchVersionOut] = []
+    publication: PublicationOut | None = None
+    audit: list[ReviewAuditOut] = []
+
+
+class ReviewDecisionIn(BaseModel):
+    """Body for approve / request-revision / reject."""
+
+    feedback: str = Field(default="", max_length=20_000)
+    reviewer: str | None = Field(default=None, max_length=200)
+    expected_digest: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Digest of the patch the reviewer was looking at. When supplied and "
+            "stale, the decision is refused rather than applied to a patch the "
+            "reviewer never saw."
+        ),
+    )

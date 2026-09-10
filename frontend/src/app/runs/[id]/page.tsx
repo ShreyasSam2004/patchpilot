@@ -21,6 +21,7 @@ import {
   TestsPanel,
   TracePanel,
 } from "@/components/panels";
+import { ReviewPanel } from "@/components/review";
 import { Timeline } from "@/components/timeline";
 import {
   Badge,
@@ -39,12 +40,13 @@ import {
   type Hypothesis,
   type RunDetail,
   type RunEvent,
+  type Review,
   type RunFiles,
   type TestRun,
   type ToolCall,
 } from "@/lib/types";
 
-type Tab = "overview" | "files" | "patch" | "tests" | "trace" | "metrics";
+type Tab = "overview" | "review" | "files" | "patch" | "tests" | "trace" | "metrics";
 
 export default function RunPage() {
   const params = useParams<{ id: string }>();
@@ -58,6 +60,9 @@ export default function RunPage() {
   const [files, setFiles] = useState<RunFiles | null>(null);
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([]);
   const [tab, setTab] = useState<Tab>("overview");
+  const [review, setReview] = useState<Review | null>(null);
+  const [reviewBusy, setReviewBusy] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -67,18 +72,20 @@ export default function RunPage() {
   const loadDetails = useCallback(async () => {
     if (!runId) return;
     try {
-      const [d, t, c, f, h] = await Promise.all([
+      const [d, t, c, f, h, r] = await Promise.all([
         api.getDiff(runId),
         api.getTests(runId),
         api.getTools(runId),
         api.getFiles(runId),
         api.getHypotheses(runId),
+        api.getReview(runId).catch(() => null),
       ]);
       setDiff(d);
       setTests(t);
       setCalls(c);
       setFiles(f);
       setHypotheses(h);
+      setReview(r);
     } catch {
       /* panels are secondary; the run header and timeline still render */
     }
@@ -157,6 +164,72 @@ export default function RunPage() {
     return stop;
   }, [runId, live, loadRun, loadDetails]);
 
+  const decide = useCallback(
+    async (kind: string, action: () => Promise<Review>) => {
+      setReviewBusy(kind);
+      setReviewError(null);
+      try {
+        setReview(await action());
+        await loadRun();
+      } catch (err) {
+        setReviewError(err instanceof ApiError ? err.message : String(err));
+        // Re-read: a refused decision usually means our view was stale.
+        await api.getReview(runId).then(setReview).catch(() => {});
+      } finally {
+        setReviewBusy(null);
+      }
+    },
+    [runId, loadRun],
+  );
+
+  const onApprove = useCallback(
+    () =>
+      decide("approve", () =>
+        // The digest we rendered. If the patch moved underneath us the server
+        // refuses rather than approving something the reviewer never saw.
+        api.approveReview(runId, { expected_digest: review?.current?.digest ?? null }),
+      ),
+    [decide, runId, review],
+  );
+
+  const onRequestRevision = useCallback(
+    (feedback: string) => decide("revision", () => api.requestRevision(runId, { feedback })),
+    [decide, runId],
+  );
+
+  const onReject = useCallback(
+    (feedback: string) => decide("reject", () => api.rejectReview(runId, { feedback })),
+    [decide, runId],
+  );
+
+  const onPublish = useCallback(async () => {
+    setReviewBusy("publish");
+    setReviewError(null);
+    try {
+      await api.publishRun(runId, {});
+      setReview(await api.getReview(runId));
+      await loadRun();
+    } catch (err) {
+      setReviewError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setReviewBusy(null);
+    }
+  }, [runId, loadRun]);
+
+  const onSelectVersion = useCallback(
+    async (version: number) => {
+      try {
+        const picked = await api.getPatchVersion(runId, version);
+        setDiff(null);
+        setReview((previous) => (previous ? { ...previous, current: picked } : previous));
+        setTab("review");
+      } catch {
+        /* the current version stays on screen */
+      }
+    },
+    [runId],
+  );
+
   if (loading) return <Spinner label="Loading run…" />;
 
   if (error && !run) {
@@ -192,6 +265,28 @@ export default function RunPage() {
               Run #{run.code}
             </span>
             <RunStateBadge state={run.state} />
+            {/* The review state is a separate claim from the agent's own, and
+                belongs beside it: "the agent finished" is not "a human approved
+                this". */}
+            {review && review.review_state !== "RUNNING" && (
+              <button type="button" onClick={() => setTab("review")}>
+                <Badge
+                  tone={
+                    review.review_state === "PR_CREATED" ||
+                    review.review_state === "APPROVED"
+                      ? "ok"
+                      : review.review_state === "REJECTED" ||
+                          review.review_state === "PUBLISH_FAILED"
+                        ? "bad"
+                        : "warn"
+                  }
+                >
+                  {review.review_state === "PATCH_READY"
+                    ? "awaiting review"
+                    : review.review_state.replace(/_/g, " ").toLowerCase()}
+                </Badge>
+              </button>
+            )}
             {run.is_benchmark_task && <Badge tone="accent">benchmark task</Badge>}
           </div>
           <h1 className="mt-1.5 truncate text-lg font-semibold tracking-tight">
@@ -278,6 +373,15 @@ export default function RunPage() {
               onChange={setTab}
               tabs={[
                 { id: "overview", label: "Overview" },
+                ...(review?.current
+                  ? [
+                      {
+                        id: "review" as const,
+                        label: "Review",
+                        count: review.versions.length,
+                      },
+                    ]
+                  : []),
                 { id: "files", label: "Files", count: files?.inspected_count },
                 { id: "patch", label: "Patch", count: diff?.files.length },
                 { id: "tests", label: "Tests", count: tests.length },
@@ -288,6 +392,20 @@ export default function RunPage() {
 
             {tab === "overview" && (
               <OverviewTab run={run} hypotheses={hypotheses} />
+            )}
+            {tab === "review" && review && (
+              <div className="p-4">
+                <ReviewPanel
+                  review={review}
+                  busy={reviewBusy}
+                  error={reviewError}
+                  onApprove={onApprove}
+                  onRequestRevision={onRequestRevision}
+                  onReject={onReject}
+                  onPublish={onPublish}
+                  onSelectVersion={onSelectVersion}
+                />
+              </div>
             )}
             {tab === "files" && <FilesPanel files={files} />}
             {tab === "patch" && <DiffPanel diff={diff} />}

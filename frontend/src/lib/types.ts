@@ -97,6 +97,7 @@ export interface RunSummary {
   issue_title: string | null;
   issue_url: string | null;
   state: RunState;
+  review_state: ReviewState;
   summary: string;
   provider: string;
   model: string;
@@ -364,4 +365,123 @@ export interface RunStats {
   active: number;
   resolved: number;
   agent_success_rate: number | null;
+}
+
+/* ------------------------------------------------------------------ review */
+
+/**
+ * Where a run sits in human review. Distinct from `RunState`, which is what the
+ * agent is doing: the agent believing it is finished is not the same claim as a
+ * person having approved a specific patch for publication.
+ */
+export type ReviewState =
+  | "RUNNING"
+  | "PATCH_READY"
+  | "REVISION_REQUESTED"
+  | "REVISING"
+  | "APPROVED"
+  | "PUBLISHING"
+  | "PR_CREATED"
+  | "REJECTED"
+  | "PUBLISH_FAILED";
+
+export interface PatchVersion {
+  version: number;
+  /** SHA-256 of the exact patch. Approval binds to this. */
+  digest: string;
+  files: string[];
+  insertions: number;
+  deletions: number;
+  patch_quality: string;
+  verification: {
+    passed?: number;
+    failed?: number;
+    errors?: number;
+    framework?: string;
+    green?: boolean;
+    summary_recognized?: boolean;
+    verified_by_tests?: boolean;
+    command?: string;
+  };
+  model: string;
+  iterations: number;
+  root_cause: string;
+  repair_summary: string;
+  decision: string | null;
+  reviewer_feedback: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  created_at: string;
+  /** Only populated for the current version and for single-version fetches. */
+  diff: string;
+}
+
+export interface Publication {
+  state: ReviewState;
+  provider: string;
+  owner: string;
+  repo: string;
+  base_branch: string;
+  base_commit_sha: string;
+  observed_base_head: string | null;
+  /** True when the base branch moved while the agent was working. */
+  base_drifted: boolean;
+  branch: string | null;
+  commit_sha: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_state: string | null;
+  checks: {
+    runs?: { name: string; status: string; conclusion: string | null; url: string | null }[];
+    fetched_at?: string;
+  };
+  completed_steps: string[];
+  error_code: string | null;
+  error_detail: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewAuditEntry {
+  action: string;
+  patch_version: number | null;
+  actor: string | null;
+  feedback: string;
+  patch_digest: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface Review {
+  run_id: string;
+  code: string;
+  repository: string;
+  repo_owner: string | null;
+  repo_name: string | null;
+  base_branch: string | null;
+  base_commit: string | null;
+  issue_title: string | null;
+  issue_url: string | null;
+  model: string;
+  run_state: RunState;
+  review_state: ReviewState;
+  approved_patch_sha256: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  can_approve: boolean;
+  can_publish: boolean;
+  /** False when GitHub is unconfigured or the run has no publishable target. */
+  publishing_available: boolean;
+  publishing_unavailable_reason: string | null;
+  current: PatchVersion | null;
+  versions: PatchVersion[];
+  publication: Publication | null;
+  audit: ReviewAuditEntry[];
+}
+
+export interface ReviewDecisionInput {
+  feedback?: string;
+  reviewer?: string | null;
+  /** Digest the reviewer was looking at; a stale one refuses the decision. */
+  expected_digest?: string | null;
 }

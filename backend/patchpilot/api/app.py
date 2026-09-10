@@ -17,7 +17,7 @@ from ..db.session import dispose_db, init_db
 from ..errors import BenchmarkError, ConfigurationError, PatchPilotError, WorkspaceError
 from ..logging_setup import configure_logging, get_logger
 from ..worker.runner import Worker
-from .routers import benchmarks, mcp, runs, system
+from .routers import benchmarks, mcp, review, runs, system
 
 log = get_logger(__name__)
 
@@ -75,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(system.router)
     app.include_router(runs.router)
+    app.include_router(review.router)
     app.include_router(benchmarks.router)
     app.include_router(mcp.router)
 

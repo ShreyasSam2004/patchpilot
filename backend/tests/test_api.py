@@ -544,3 +544,175 @@ async def test_benchmark_aggregate_survives_reloaded_timestamps(app_settings) ->
         assert refreshed is not None
         assert refreshed.aggregate["avg_runtime_s"] is not None
         assert refreshed.aggregate["avg_runtime_s"] > 0
+
+
+# ------------------------------------------------------- review endpoints
+
+
+async def _seed_reviewable_run(app_settings, *, run_id: str = "api-review-1") -> str:
+    """A finished run with one meaningful patch awaiting review."""
+    from patchpilot.agent.result import AgentResult, TestRunRecord
+    from patchpilot.db.models import Run
+    from patchpilot.domain.enums import ReviewState
+    from patchpilot.review import service as review_service
+
+    patch = (
+        "diff --git a/pkg/mod.py b/pkg/mod.py\n--- a/pkg/mod.py\n+++ b/pkg/mod.py\n"
+        "@@ -1,3 +1,4 @@\n+    return abs(value)\n"
+    )
+    async with session_scope(app_settings) as session:
+        run = Run(
+            id=run_id,
+            code=run_id[-4:].upper(),
+            repository="owner/repo",
+            repo_url="https://github.com/owner/repo",
+            repo_provider="github",
+            repo_owner="owner",
+            repo_name="repo",
+            base_commit="a" * 40,
+            issue="something is wrong",
+            issue_title="something is wrong",
+            issue_url="https://github.com/owner/repo/issues/7",
+            model="claude-opus-5",
+            state=str(RunState.RESOLVED),
+            review_state=str(ReviewState.RUNNING),
+        )
+        session.add(run)
+        await session.flush()
+
+        result = AgentResult(run_id=run.id, state=RunState.RESOLVED)
+        result.final_patch = patch
+        result.files_modified = ["pkg/mod.py"]
+        result.summary = "Guard the negative case."
+        result.test_runs.append(
+            TestRunRecord(
+                iteration=3, command="python -m pytest -q", passed=12, failed=0, errors=0,
+                skipped=0, total=12, green=True, duration_ms=900, framework="pytest",
+                summary_recognized=True,
+            )
+        )
+        await review_service.record_generated_patch(session, run, result)
+    return run_id
+
+
+async def test_review_endpoint_describes_the_pending_decision(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings)
+    body = (await client.get(f"/api/runs/{run_id}/review")).json()
+
+    assert body["review_state"] == "PATCH_READY"
+    assert body["can_approve"] is True
+    assert body["can_publish"] is False
+    assert body["current"]["version"] == 1
+    assert body["current"]["diff"].startswith("diff --git")
+    assert body["current"]["verification"]["passed"] == 12
+    # GitHub is not configured in tests, and the UI is told why.
+    assert body["publishing_available"] is False
+    assert "not configured" in body["publishing_unavailable_reason"]
+
+
+async def test_approve_then_the_run_is_approved(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-2")
+    response = await client.post(
+        f"/api/runs/{run_id}/review/approve", json={"reviewer": "alice"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review_state"] == "APPROVED"
+    assert body["approved_patch_sha256"]
+    assert body["approved_by"] == "alice"
+    assert body["can_publish"] is True
+
+
+async def test_approving_twice_returns_the_same_state(client, app_settings) -> None:
+    """Double-clicked button."""
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-3")
+    first = await client.post(f"/api/runs/{run_id}/review/approve", json={"reviewer": "a"})
+    second = await client.post(f"/api/runs/{run_id}/review/approve", json={"reviewer": "a"})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["approved_patch_sha256"] == second.json()["approved_patch_sha256"]
+
+
+async def test_a_stale_digest_is_rejected_with_400(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-4")
+    response = await client.post(
+        f"/api/runs/{run_id}/review/approve",
+        json={"reviewer": "alice", "expected_digest": "0" * 64},
+    )
+    assert response.status_code == 400
+    assert "changed since it was displayed" in response.json()["detail"]
+
+
+async def test_revision_requires_feedback_and_requeues_the_run(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-5")
+
+    empty = await client.post(f"/api/runs/{run_id}/review/revision", json={"feedback": "  "})
+    assert empty.status_code == 400
+
+    ok = await client.post(
+        f"/api/runs/{run_id}/review/revision",
+        json={"feedback": "Also check the sibling method.", "reviewer": "alice"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["review_state"] == "REVISION_REQUESTED"
+
+    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    assert detail["state"] == "PENDING", "the run goes back into the queue"
+
+
+async def test_reject_is_terminal(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-6")
+    body = (
+        await client.post(
+            f"/api/runs/{run_id}/review/reject",
+            json={"feedback": "Wrong approach.", "reviewer": "bob"},
+        )
+    ).json()
+    assert body["review_state"] == "REJECTED"
+
+    # And nothing further is possible.
+    again = await client.post(f"/api/runs/{run_id}/review/approve", json={})
+    assert again.status_code == 409
+
+
+async def test_publishing_without_approval_is_a_conflict(client, app_settings) -> None:
+    """PATCH_READY is not permission to publish."""
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-7")
+    response = await client.post(f"/api/runs/{run_id}/publish", json={})
+    assert response.status_code == 409
+    assert "approve the patch first" in response.json()["detail"]
+
+
+async def test_publishing_without_github_configured_fails_cleanly(client, app_settings) -> None:
+    """The app stays usable; publication reports why it cannot run."""
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-8")
+    await client.post(f"/api/runs/{run_id}/review/approve", json={"reviewer": "alice"})
+
+    response = await client.post(f"/api/runs/{run_id}/publish", json={"reviewer": "alice"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error_code"] == "NOT_CONFIGURED"
+    assert body["pr_number"] is None
+
+
+async def test_review_actions_appear_in_the_run_event_stream(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-9")
+    await client.post(f"/api/runs/{run_id}/review/approve", json={"reviewer": "alice"})
+
+    events = (await client.get(f"/api/runs/{run_id}/events")).json()
+    assert any(e["type"] == "PATCH_APPROVED" for e in events)
+
+
+async def test_historical_versions_stay_inspectable(client, app_settings) -> None:
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-10")
+    version = (await client.get(f"/api/runs/{run_id}/review/versions/1")).json()
+    assert version["version"] == 1
+    assert version["diff"].startswith("diff --git")
+    assert (await client.get(f"/api/runs/{run_id}/review/versions/99")).status_code == 404
+
+
+async def test_no_generic_git_endpoint_is_exposed(client) -> None:
+    """The frontend may only invoke named domain actions."""
+    spec = (await client.get("/openapi.json")).json()
+    paths = " ".join(spec.get("paths", {}))
+    for forbidden in ("execute", "git-command", "shell", "merge"):
+        assert forbidden not in paths

@@ -8,6 +8,10 @@ import type {
   Fixture,
   Hypothesis,
   Leaderboard,
+  PatchVersion,
+  Publication,
+  Review,
+  ReviewDecisionInput,
   RunDetail,
   RunEvent,
   RunFiles,
@@ -141,6 +145,34 @@ export const api = {
   cancelRun: (id: string) =>
     request<{ cancel_requested: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
   fixtures: () => request<Fixture[]>("/api/runs/fixtures"),
+
+  // -- human review and GitHub publication ---------------------------------
+  // Named domain actions only: nothing here lets the client choose a branch,
+  // a repository or a git command.
+  getReview: (id: string) => request<Review>(`/api/runs/${id}/review`),
+  getPatchVersion: (id: string, version: number) =>
+    request<PatchVersion>(`/api/runs/${id}/review/versions/${version}`),
+  approveReview: (id: string, input: ReviewDecisionInput) =>
+    request<Review>(`/api/runs/${id}/review/approve`, {
+      method: "POST",
+      body: JSON.stringify(clean(input)),
+    }),
+  requestRevision: (id: string, input: ReviewDecisionInput) =>
+    request<Review>(`/api/runs/${id}/review/revision`, {
+      method: "POST",
+      body: JSON.stringify(clean(input)),
+    }),
+  rejectReview: (id: string, input: ReviewDecisionInput) =>
+    request<Review>(`/api/runs/${id}/review/reject`, {
+      method: "POST",
+      body: JSON.stringify(clean(input)),
+    }),
+  publishRun: (id: string, input: ReviewDecisionInput) =>
+    request<Publication>(`/api/runs/${id}/publish`, {
+      method: "POST",
+      body: JSON.stringify(clean(input)),
+    }),
+  getPublication: (id: string) => request<Publication>(`/api/runs/${id}/publication`),
 
   // -- benchmarks
   createBenchmark: (input: CreateBenchmarkInput) =>

@@ -20,6 +20,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "unidiff>=0.7.5",
     "sse-starlette>=2.1",
+    # GitHub App authentication: RS256-signed JWTs for installation tokens.
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

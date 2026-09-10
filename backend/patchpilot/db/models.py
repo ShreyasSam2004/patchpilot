@@ -18,7 +18,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from ..domain.enums import BenchmarkRunStatus, BenchmarkStatus, RunState
+from ..domain.enums import BenchmarkRunStatus, BenchmarkStatus, ReviewState, RunState
 from ..ids import new_id
 
 
@@ -106,6 +106,25 @@ class Run(Base):
     cancel_requested: Mapped[bool] = mapped_column(sa.Boolean, default=False)
     last_seq: Mapped[int] = mapped_column(sa.Integer, default=0)
 
+    # -- human review ------------------------------------------------------
+    review_state: Mapped[str] = mapped_column(
+        sa.String(24), default=str(ReviewState.RUNNING), index=True
+    )
+    approved_patch_sha256: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    """Digest of the exact patch a human approved. Publication refuses to push
+    anything whose digest differs from this."""
+    approved_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+
+    # -- canonical publication target, fixed when the run is created --------
+    # Never re-derived later from issue text or anything the model produced:
+    # a push target inferred from model-influenced text is how an agent opens a
+    # pull request against a repository nobody asked about.
+    repo_provider: Mapped[str | None] = mapped_column(sa.String(20), nullable=True)
+    repo_owner: Mapped[str | None] = mapped_column(sa.String(120), nullable=True)
+    repo_name: Mapped[str | None] = mapped_column(sa.String(120), nullable=True)
+    base_branch: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+
     benchmark_task_id: Mapped[str | None] = mapped_column(
         sa.String(32), sa.ForeignKey("benchmark_tasks.id", ondelete="SET NULL"), nullable=True
     )
@@ -124,6 +143,12 @@ class Run(Base):
     )
     test_runs: Mapped[list[TestRunRow]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="TestRunRow.id"
+    )
+    patch_versions: Mapped[list[PatchVersionRow]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="PatchVersionRow.version"
+    )
+    review_audit: Mapped[list[ReviewAuditRow]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="ReviewAuditRow.id"
     )
 
     __table_args__ = (
@@ -363,3 +388,132 @@ class BenchmarkTask(Base):
     @property
     def resolved(self) -> bool:
         return self.benchmark_status == str(BenchmarkStatus.RESOLVED)
+
+
+class PatchVersionRow(Base):
+    """One patch offered for human review.
+
+    Distinct from :class:`PatchRow`, which records what the agent applied on a
+    given iteration. This is the reviewer-facing artefact: the complete diff as
+    proposed, its digest, the verification behind it, and what the reviewer
+    decided. Versions are never overwritten -- a revision adds V2 beside V1 --
+    because the audit question "what exactly was approved, and what had been
+    rejected before it" cannot be answered from a mutated row.
+    """
+
+    __tablename__ = "patch_versions"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        sa.String(32), sa.ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(sa.Integer)
+    diff: Mapped[str] = mapped_column(sa.Text, default="")
+    digest: Mapped[str] = mapped_column(sa.String(64), index=True)
+    """SHA-256 of the canonical patch. What approval binds to."""
+
+    files: Mapped[list[str]] = mapped_column(sa.JSON, default=list)
+    insertions: Mapped[int] = mapped_column(sa.Integer, default=0)
+    deletions: Mapped[int] = mapped_column(sa.Integer, default=0)
+    patch_quality: Mapped[str] = mapped_column(sa.String(20), default="no_patch")
+    verification: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
+    """Test evidence as it stood for this version: counts, framework, whether
+    the runner's summary was actually recognised."""
+
+    model: Mapped[str] = mapped_column(sa.String(120), default="")
+    iterations: Mapped[int] = mapped_column(sa.Integer, default=0)
+    root_cause: Mapped[str] = mapped_column(sa.Text, default="")
+    repair_summary: Mapped[str] = mapped_column(sa.Text, default="")
+
+    decision: Mapped[str | None] = mapped_column(sa.String(24), nullable=True)
+    reviewer_feedback: Mapped[str] = mapped_column(sa.Text, default="")
+    decided_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+
+    run: Mapped[Run] = relationship(back_populates="patch_versions")
+
+    __table_args__ = (
+        sa.UniqueConstraint("run_id", "version", name="uq_patch_versions_run_version"),
+        sa.Index("ix_patch_versions_run_version", "run_id", "version"),
+    )
+
+
+class PublicationRow(Base):
+    """One attempt to publish one approved patch.
+
+    Unique on ``(run_id, patch_digest)``: that constraint, not a disabled
+    button, is what stops a double-clicked Approve from opening two pull
+    requests. A retry finds the existing row and resumes from
+    :attr:`completed_steps` rather than repeating work that already landed.
+    """
+
+    __tablename__ = "publications"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        sa.String(32), sa.ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    patch_version_id: Mapped[int | None] = mapped_column(
+        sa.Integer, sa.ForeignKey("patch_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    patch_digest: Mapped[str] = mapped_column(sa.String(64), index=True)
+    state: Mapped[str] = mapped_column(sa.String(24), default=str(ReviewState.PUBLISHING))
+
+    # -- target, captured at publication time -------------------------------
+    provider: Mapped[str] = mapped_column(sa.String(20), default="github")
+    owner: Mapped[str] = mapped_column(sa.String(120), default="")
+    repo: Mapped[str] = mapped_column(sa.String(120), default="")
+    base_branch: Mapped[str] = mapped_column(sa.String(255), default="")
+    base_commit_sha: Mapped[str] = mapped_column(sa.String(64), default="")
+    observed_base_head: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    """Where the base branch actually pointed when we published. Differs from
+    :attr:`base_commit_sha` when the branch moved while the agent worked."""
+    base_drifted: Mapped[bool] = mapped_column(sa.Boolean, default=False)
+
+    # -- results ------------------------------------------------------------
+    branch: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(sa.String(500), nullable=True)
+    pr_state: Mapped[str | None] = mapped_column(sa.String(24), nullable=True)
+    checks: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
+
+    completed_steps: Mapped[list[str]] = mapped_column(sa.JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+
+    __table_args__ = (
+        sa.UniqueConstraint("run_id", "patch_digest", name="uq_publications_run_digest"),
+    )
+
+    def has_completed(self, step: str) -> bool:
+        return step in (self.completed_steps or [])
+
+
+class ReviewAuditRow(Base):
+    """Append-only record of every review and publication action.
+
+    Separate from the run event stream because it answers a different question
+    and must survive independently: who approved which digest, against which
+    base, and what was created as a result.
+    """
+
+    __tablename__ = "review_audit"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        sa.String(32), sa.ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    patch_version: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    action: Mapped[str] = mapped_column(sa.String(32), index=True)
+    actor: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    feedback: Mapped[str] = mapped_column(sa.Text, default="")
+    patch_digest: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+
+    run: Mapped[Run] = relationship(back_populates="review_audit")

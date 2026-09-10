@@ -168,6 +168,13 @@ class AgentTask:
     test_command: str | None = None
     hints: str | None = None
     extra_guidance: str | None = None
+    seed_patch: str | None = None
+    """A diff to apply to the fresh workspace before the agent starts.
+
+    Used when a reviewer asks for changes: the run re-prepares from the same
+    base commit, then the previously reviewed patch is restored, so the agent
+    refines that solution instead of rediscovering it.
+    """
     budget_overrides: dict[str, Any] = field(default_factory=dict)
 
 
@@ -256,6 +263,9 @@ class AgentOrchestrator:
             isolation=self.sandbox.info().isolation,
         )
 
+        if self.task.seed_patch:
+            await self._restore_previous_patch(self.task.seed_patch)
+
         # Somewhere to put reproduction scripts. `_stage_all` already excludes
         # `.patchpilot*` from the diff, but with nowhere obvious to write, one
         # run put its repro script in the repository root and submitted it as
@@ -308,6 +318,40 @@ class AgentOrchestrator:
         )
 
         self.transcript.add_user(initial_user_message(self.budget.describe_remaining()))
+
+    async def _restore_previous_patch(self, diff: str) -> None:
+        """Re-apply the patch a reviewer sent back, before the agent starts.
+
+        Failure is not fatal: the workspace is simply clean and the agent works
+        from the issue plus the feedback. Aborting the run would be worse -- the
+        reviewer asked for a revision, not for nothing to happen.
+        """
+        patch_file = self.workspace.root / ".patchpilot" / "previous.patch"
+        try:
+            patch_file.parent.mkdir(parents=True, exist_ok=True)
+            patch_file.write_text(diff, encoding="utf-8", newline="\n")
+            result = await self.workspace.git(
+                "apply", "--whitespace=nowarn", self.workspace.relpath(patch_file)
+            )
+        except Exception as exc:
+            await self.emitter.warning(
+                "could not restore the previously reviewed patch", error=str(exc)[:200]
+            )
+            return
+        finally:
+            with contextlib.suppress(OSError):
+                patch_file.unlink(missing_ok=True)
+
+        if result.ok:
+            await self.emitter.warning(
+                "restored the previously reviewed patch for revision",
+                bytes=len(diff),
+            )
+        else:
+            await self.emitter.warning(
+                "the previously reviewed patch no longer applies; starting from a clean tree",
+                detail=result.stderr[:200],
+            )
 
     async def _discover_test_command(self) -> tuple[str, str | None]:
         """Guess a test command, and the directory to run it from.

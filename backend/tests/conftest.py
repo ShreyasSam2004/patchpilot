@@ -89,3 +89,31 @@ async def fixture_workspace(request, tmp_path: Path):
     sandbox = LocalSandbox(root, SandboxLimits(timeout_s=120, max_output_bytes=200_000))
     workspace = await prepare_workspace(root, sandbox, local_path=FIXTURES_DIR / name / "repo")
     return workspace
+
+
+@pytest.fixture
+async def db_settings(settings, tmp_path):
+    """Settings pointing at an isolated SQLite file, with the schema created."""
+    from patchpilot.db.session import dispose_db, init_db
+
+    settings.database_url = f"sqlite+aiosqlite:///{(tmp_path / 'review.db').as_posix()}"
+    settings.worker_enabled = False
+    await dispose_db()
+    await init_db(settings)
+    yield settings
+    await dispose_db()
+
+
+@pytest.fixture
+async def session(db_settings):
+    """A real AsyncSession against a temporary database.
+
+    Real rather than a mock: the review workflow's guarantees are partly
+    enforced by the schema -- the unique constraint on (run_id, patch_digest) is
+    what stops a double publication -- and a stubbed session would not exercise
+    them.
+    """
+    from patchpilot.db.session import session_scope
+
+    async with session_scope(db_settings) as active:
+        yield active
