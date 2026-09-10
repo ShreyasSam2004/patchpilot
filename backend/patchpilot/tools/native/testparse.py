@@ -37,6 +37,38 @@ _UNITTEST_COUNT = re.compile(r"(failures|errors|skipped|expected failures)=(\d+)
 _JEST_TESTS = re.compile(r"^Tests:\s+(.*)$", re.MULTILINE)
 _JEST_COUNT = re.compile(r"(\d+)\s+(failed|passed|skipped|todo|total)")
 
+# SymPy's own runner (`bin/test`, `sympy.test()`), which older SymPy checkouts
+# use instead of pytest. Real summaries taken from stored harness logs:
+#
+#   "================= tests finished: 45 passed, in 11.51 seconds =================="
+#   "============= tests finished: 30 passed, 2 failed, in 2.39 seconds ============="
+#   "== tests finished: 16 passed, 1 failed, 3 expected to fail, in 111.49 seconds =="
+#   " tests finished: 79 passed, 1 failed, 1 expected to fail, 1 exceptions, "
+#
+# The decorative "=" padding varies with terminal width, and the last form wraps
+# — "in 0.88 seconds" lands on the following line — so neither the padding nor
+# the duration can be required. Anchoring on "tests finished:" is what keeps
+# this from matching arbitrary prose containing the word "passed".
+_SYMPY_SUMMARY = re.compile(
+    r"tests\s+finished:\s*(?P<body>[^=\n]*?)"
+    r"(?:,?\s*in\s+[\d.]+\s+seconds?)?\s*=*\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SYMPY_COUNT = re.compile(
+    r"(\d+)\s+(passed|failed|skipped|expected\s+to\s+fail|exceptions?|errors?)",
+    re.IGNORECASE,
+)
+#: Duration may wrap onto the next line, so it is searched over a window rather
+#: than within the summary line.
+_SYMPY_DURATION = re.compile(r"in\s+([\d.]+)\s+seconds?", re.IGNORECASE)
+#: SymPy banners each failing test between underscore rules:
+#:   "_____ sympy/printing/tests/test_ccode.py:test_ccode_sinc _____"
+#: This is the only place the runner names individual failures, and it covers
+#: both ordinary failures (F) and exceptions (E).
+_SYMPY_FAILING = re.compile(
+    r"_{3,}\s*\S+\.py:([A-Za-z_][A-Za-z_0-9]*)\s*_{3,}"
+)
+
 
 @dataclass(slots=True)
 class TestOutcome:
@@ -46,6 +78,9 @@ class TestOutcome:
     failed: int = 0
     errors: int = 0
     skipped: int = 0
+    xfail: int = 0
+    """Tests the suite expects to fail. Not a failure: a runner reporting only
+    xfails has behaved exactly as intended."""
     total: int = 0
     duration_s: float = 0.0
     exit_code: int = 0
@@ -80,6 +115,8 @@ class TestOutcome:
             bits.append(f"{self.errors} errors")
         if self.skipped:
             bits.append(f"{self.skipped} skipped")
+        if self.xfail:
+            bits.append(f"{self.xfail} expected to fail")
         return ", ".join(bits)
 
 
@@ -90,6 +127,10 @@ def parse_test_output(
     text = f"{stdout}\n{stderr}"
     outcome = TestOutcome(exit_code=exit_code, timed_out=timed_out)
 
+    # SymPy first: its summary carries the most specific anchor ("tests
+    # finished:"), so trying it first cannot shadow another runner.
+    if _parse_sympy(text, outcome):
+        return outcome
     if _parse_pytest(text, outcome):
         return outcome
     if _parse_unittest(text, outcome):
@@ -97,6 +138,54 @@ def parse_test_output(
     if _parse_jest(text, outcome):
         return outcome
     return outcome
+
+
+def _parse_sympy(text: str, outcome: TestOutcome) -> bool:
+    """Parse SymPy's native runner summary.
+
+    PatchPilot switched old SymPy checkouts onto `python bin/test` because their
+    interpreter has no pytest — but the parser still only understood pytest, so
+    every one of those runs came back ``0 passed, 0 failed, unknown``. The agent
+    was running the right tests and learning nothing from them.
+    """
+    matches = [m for m in _SYMPY_SUMMARY.finditer(text) if m.group("body").strip()]
+    if not matches:
+        return False
+    last = matches[-1]
+    body = last.group("body").strip().rstrip(",").strip()
+    counts = _SYMPY_COUNT.findall(body)
+    if not counts:
+        return False
+
+    outcome.framework = "sympy"
+    outcome.parsed = True
+    outcome.summary_line = body
+    for value, label in counts:
+        number = int(value)
+        key = " ".join(label.lower().split())
+        if key == "passed":
+            outcome.passed = number
+        elif key == "failed":
+            outcome.failed = number
+        elif key == "skipped":
+            outcome.skipped = number
+        elif key == "expected to fail":
+            outcome.xfail = number
+        else:  # "exception(s)" / "error(s)"
+            outcome.errors = number
+
+    # The duration often wraps onto the next line, so look just past the summary
+    # rather than inside it.
+    window = text[last.start() : last.end() + 120]
+    duration = _SYMPY_DURATION.search(window)
+    if duration:
+        outcome.duration_s = float(duration.group(1))
+
+    outcome.total = (
+        outcome.passed + outcome.failed + outcome.errors + outcome.skipped + outcome.xfail
+    )
+    outcome.failing_tests = _unique(_SYMPY_FAILING.findall(text))[:50]
+    return True
 
 
 def _parse_pytest(text: str, outcome: TestOutcome) -> bool:
@@ -124,6 +213,11 @@ def _parse_pytest(text: str, outcome: TestOutcome) -> bool:
             outcome.errors = number
         elif label == "skipped":
             outcome.skipped = number
+        elif label in {"xfailed", "xpassed"}:
+            # Already matched by the summary regex; recording it costs nothing
+            # and keeps "expected to fail" meaningful across runners. `green`
+            # does not consult it, so pytest's behaviour is unchanged.
+            outcome.xfail += number
 
     duration = re.search(r"in\s+([\d.]+)\s*s", body)
     if duration:
@@ -215,6 +309,13 @@ def extract_failure_excerpt(stdout: str, stderr: str, limit: int = 6000) -> str:
         if index != -1:
             excerpt = text[index:]
             return excerpt[:limit] + ("\n...[truncated]" if len(excerpt) > limit else "")
+
+    # SymPy banners each failure between underscore rules; the first banner
+    # marks the start of the section actually worth reading.
+    banner = _SYMPY_FAILING.search(text)
+    if banner is not None:
+        excerpt = text[max(0, banner.start() - 200) :]
+        return excerpt[:limit] + ("\n...[truncated]" if len(excerpt) > limit else "")
 
     for marker in ("Traceback (most recent call last)", "FAIL:", "ERROR:"):
         index = text.find(marker)

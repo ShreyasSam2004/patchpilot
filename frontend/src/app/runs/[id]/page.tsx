@@ -116,8 +116,16 @@ export default function RunPage() {
   }, [runId, loadRun, loadDetails]);
 
   // Live stream while the run is active.
+  //
+  // The dependency list must not contain `run`. It used to, and every
+  // STATE_CHANGED event calls loadRun(), which stores a fresh object — so the
+  // effect tore the EventSource down and reopened it on each of the ~15 state
+  // transitions in a run. The churn (plus the browser's per-origin connection
+  // limit) left the stream dead, and the timeline only appeared at the end when
+  // onDone refetched everything. `live` is a boolean, so it changes exactly
+  // once: when the run reaches a terminal state.
   useEffect(() => {
-    if (!runId || !run || isTerminal(run.state)) return;
+    if (!runId || !live) return;
 
     const stop = streamRunEvents(runId, lastSeq.current, {
       onEvent: (event) => {
@@ -147,7 +155,7 @@ export default function RunPage() {
       },
     });
     return stop;
-  }, [runId, run, loadRun, loadDetails]);
+  }, [runId, live, loadRun, loadDetails]);
 
   if (loading) return <Spinner label="Loading run…" />;
 

@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # ---- model provider ----------------------------------------------------
     provider: ProviderKind = "anthropic"
-    model: str = "claude-sonnet-5"
+    model: str = "claude-opus-5"
     max_output_tokens: int = 8192
     temperature: float = 0.0
     """OpenAI only. The current Claude models reject sampling parameters; use

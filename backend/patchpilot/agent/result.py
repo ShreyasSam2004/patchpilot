@@ -25,6 +25,10 @@ class TestRunRecord:
     duration_ms: int
     framework: str = "unknown"
     timed_out: bool = False
+    summary_recognized: bool = False
+    """Whether the runner's own summary was parsed, as opposed to the result
+    being inferred from the exit code alone."""
+    xfail: int = 0
     failing_tests: list[str] = field(default_factory=list)
     output: str = ""
 
@@ -41,6 +45,8 @@ class TestRunRecord:
             "duration_ms": self.duration_ms,
             "framework": self.framework,
             "timed_out": self.timed_out,
+            "summary_recognized": self.summary_recognized,
+            "xfail": self.xfail,
             "failing_tests": self.failing_tests,
             "output": self.output,
         }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Badge,
@@ -44,23 +44,39 @@ export default function NewRunPage() {
     max_runtime_s: "",
   });
 
+  // Read inside the async mount effect, whose closure would otherwise capture
+  // the state as it was before the fixtures request resolved.
+  const sourceRef = useRef<Source>("fixture");
+  const issueTouched = useRef(false);
+
   useEffect(() => {
     (async () => {
       try {
         const [f, s] = await Promise.all([api.fixtures(), api.status()]);
         setFixtures(f);
         setStatus(s);
-        if (f.length > 0) {
-          setForm((prev) => ({ ...prev, fixture: f[0].id, issue: f[0].issue }));
-        }
+        if (f.length === 0) return;
+        setForm((prev) => {
+          // This resolves a few hundred milliseconds after mount, by which time
+          // the user may already have switched to Repository URL and started
+          // typing. Prefilling unconditionally overwrote what they had written
+          // — the intermittent "why is there already a description here?".
+          const mayPrefill =
+            sourceRef.current === "fixture" &&
+            !issueTouched.current &&
+            prev.issue.trim() === "";
+          return { ...prev, fixture: f[0].id, issue: mayPrefill ? f[0].issue : prev.issue };
+        });
       } catch {
         /* the banner below covers an unreachable API */
       }
     })();
   }, []);
 
-  const set = (key: keyof typeof form, value: string) =>
+  const set = (key: keyof typeof form, value: string) => {
+    if (key === "issue") issueTouched.current = true;
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
 
   /** True while the issue box still holds text a fixture put there. */
   const issueIsFixturePrefill = (text: string) =>
@@ -68,6 +84,7 @@ export default function NewRunPage() {
 
   const chooseSource = (next: Source) => {
     setSource(next);
+    sourceRef.current = next;
     setForm((prev) => {
       if (next === "fixture") return prev;
       // Leaving the fixture tab: drop the prefilled issue and test command so

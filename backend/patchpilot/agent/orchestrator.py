@@ -612,6 +612,8 @@ class AgentOrchestrator:
                 duration_ms=int(data.get("duration_ms", 0)),
                 framework=str(data.get("framework", "unknown")),
                 timed_out=bool(data.get("timed_out", False)),
+                summary_recognized=bool(data.get("summary_recognized", False)),
+                xfail=int(data.get("xfail", 0)),
                 failing_tests=list(data.get("failing_tests", [])),
                 output=result.content[:60_000],
             )
@@ -621,7 +623,12 @@ class AgentOrchestrator:
             # Verification is only meaningful after the code changed. A suite
             # that was green before the edit says nothing about the fix, and a
             # later edit invalidates an earlier pass.
-            if record.green and self._files_modified:
+            #
+            # It also requires that we actually understood the runner. A command
+            # that exits 0 on output we could not parse is not evidence: for a
+            # whole benchmark family the parser did not know SymPy's runner, and
+            # every "verified" reading meant nothing more than exit code 0.
+            if record.green and record.summary_recognized and self._files_modified:
                 self.result.metrics.verified_by_tests = True
                 self.tool_state["tests_stale"] = False
             if not record.green:

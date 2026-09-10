@@ -155,7 +155,12 @@ class RunTestsTool(Tool[RunTestsArgs]):
                 "skipped": outcome.skipped,
                 "total": outcome.total,
                 "green": outcome.green,
+                "xfail": outcome.xfail,
                 "framework": outcome.framework,
+                # Whether a runner summary was actually recognised. An
+                # exit code of 0 from output we could not parse is a much
+                # weaker claim than "the suite reported success".
+                "summary_recognized": outcome.parsed,
                 "duration_ms": result.duration_ms,
                 "failing_tests": outcome.failing_tests,
                 "timed_out": result.timed_out,
