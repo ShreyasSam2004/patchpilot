@@ -26,6 +26,15 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
+    """Deterministic settings, independent of the developer's own .env.
+
+    ``Settings`` reads the project's .env, so anything configured there leaks
+    into the suite. GitHub credentials are cleared explicitly here: with a real
+    token present the publication tests silently changed meaning and started
+    failing with no code change, which is the sort of ambient dependency that
+    makes a suite untrustworthy. A test that wants the configured case sets it
+    on the fixture itself.
+    """
     return Settings(
         environment="test",
         provider="scripted",
@@ -35,6 +44,11 @@ def settings(tmp_path: Path) -> Settings:
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}",
         max_test_runtime_s=120,
         command_timeout_s=120,
+        github_token=None,
+        github_app_id=None,
+        github_installation_id=None,
+        github_app_private_key=None,
+        github_app_private_key_path=None,
     )
 
 

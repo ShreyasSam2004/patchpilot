@@ -723,3 +723,19 @@ async def test_no_generic_git_endpoint_is_exposed(client) -> None:
     joined = " ".join(paths)
     for forbidden in ("execute", "git-command", "shell", "merge"):
         assert forbidden not in joined
+
+
+async def test_publishing_is_offered_once_github_is_configured(client, app_settings) -> None:
+    """The positive case, pinned so the negative one cannot pass by accident.
+
+    Its counterpart asserts publishing is unavailable; if the fixture ever
+    leaked a real token again that test would fail and this one would not, so
+    the pair brackets the behaviour from both sides.
+    """
+    app_settings.github_token = "ghp_only_a_test_value"
+    run_id = await _seed_reviewable_run(app_settings, run_id="api-review-11")
+
+    body = (await client.get(f"/api/runs/{run_id}/review")).json()
+    assert body["publishing_available"] is True
+    assert body["publishing_unavailable_reason"] is None
+    assert body["can_approve"] is True
