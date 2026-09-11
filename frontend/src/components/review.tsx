@@ -178,7 +178,43 @@ function Routing({ publication }: { publication: Publication }) {
   );
 }
 
+/** The "open a PR" page on GitHub for a branch that exists but has no PR yet. */
+function compareUrl(publication: Publication): string {
+  const upstream = `${publication.owner}/${publication.repo}`;
+  const base = publication.base_branch || "HEAD";
+  const isFork =
+    publication.strategy === "FORK" && publication.head_owner && publication.head_repo;
+  // A cross-repository comparison has to name the fork; a direct one must not,
+  // or GitHub looks for the owner-qualified branch in the target repository.
+  const head = isFork
+    ? `${publication.head_owner}:${publication.head_repo}:${publication.branch}`
+    : `${publication.branch}`;
+  return `https://github.com/${upstream}/compare/${base}...${head}?expand=1`;
+}
+
+/** Why the pull request did not open, in terms of what to do about it. */
+function prFailureReason(publication: Publication): string {
+  const upstream = `${publication.owner}/${publication.repo}`;
+  if (publication.error_code === "PERMISSION_DENIED" && publication.strategy === "FORK") {
+    return (
+      `GitHub would not open the pull request: a fine-grained personal access token ` +
+      `only has read access to repositories you do not own, and ${upstream} is not ` +
+      `yours. Opening it needs a classic token with the "public_repo" scope — which ` +
+      `does not grant workflow access.`
+    );
+  }
+  return publication.error_detail ?? "The pull request step did not complete.";
+}
+
 export function PublicationPanel({ publication }: { publication: Publication }) {
+  const done = new Set(publication.completed_steps ?? []);
+  const hasPullRequest = Boolean(publication.pr_number && publication.pr_url);
+  // The branch is on GitHub and the commit was verified against the approved
+  // patch. Only the pull request is missing, and a person can open that in one
+  // click -- so this is a stopping point, not a failure, and showing it in red
+  // beside a list of ticks tells the reader the opposite of what happened.
+  const branchPushedWithoutPr = done.has("BRANCH_PUSHED") && !hasPullRequest;
+
   return (
     <Panel title="GitHub publication">
       <div className="space-y-4 px-4 py-3">
@@ -202,11 +238,47 @@ export function PublicationPanel({ publication }: { publication: Publication }) 
           </p>
         )}
 
-        {publication.error_code && (
+        {/* Only a failure that stopped the branch reaching GitHub is shown in red.
+            One that stopped after the push is reported with the branch below. */}
+        {publication.error_code && !branchPushedWithoutPr && (
           <p className="rounded border border-[var(--color-bad)] p-2 text-[12px]">
             <strong>{ERROR_LABEL[publication.error_code] ?? publication.error_code}</strong>
             {publication.error_detail ? <> — {publication.error_detail}</> : null}
           </p>
+        )}
+
+        {branchPushedWithoutPr && (
+          <div className="space-y-2 rounded border border-[var(--color-warn)] p-2">
+            <div className="flex items-center gap-2 text-[13px]">
+              <strong>Branch pushed successfully</strong>
+              <Badge tone="ok">PUSHED</Badge>
+            </div>
+            <p className="font-mono text-[12px] text-[var(--text-muted)]">
+              {publication.head_owner && publication.head_repo
+                ? `${publication.head_owner}/${publication.head_repo}`
+                : `${publication.owner}/${publication.repo}`}
+              :{publication.branch}
+              {publication.commit_sha ? ` @ ${publication.commit_sha.slice(0, 12)}` : ""}
+              {" → "}
+              {publication.owner}/{publication.repo}:{publication.base_branch}
+            </p>
+            <p className="text-[12px]">
+              The approved patch is committed and on GitHub, and the commit was
+              verified against the bytes you approved. Only the pull request was
+              not opened, so nothing is lost — you can open it yourself:
+            </p>
+            <a
+              className="inline-block text-[12px] underline"
+              href={compareUrl(publication)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open a pull request on GitHub
+            </a>
+            <p className="text-[11px] text-[var(--text-muted)]">
+              {prFailureReason(publication)}
+            </p>
+          </div>
         )}
 
         {publication.pr_number && publication.pr_url && (
