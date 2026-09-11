@@ -19,6 +19,7 @@ from patchpilot.agent.environment import (
     probe,
     top_level_package,
 )
+from patchpilot.agent.orchestrator import _declared_test_paths, _test_command_for
 from patchpilot.domain.enums import EventType
 from patchpilot.events.bus import MemorySink
 from patchpilot.repair.progress import Pressure, ProgressTracker
@@ -704,3 +705,85 @@ async def test_the_empty_patch_trajectory_is_interrupted(settings, tmp_path) -> 
     assert result.metrics.time_to_first_source_edit is None
     assert result.metrics.meaningful_patch is False
     assert result.metrics.reproductions_before_edit >= 3
+
+
+
+# --- Reading where a project says its tests live ------------------------------
+#
+# Detecting tox.ini and then running a bare `pytest` is not the same as reading
+# it. jmespath declares `commands = python -m pytest tests` and ships a
+# hypothesis fuzzing suite under `extra/` that its own runs never touch; a bare
+# pytest from the repository root collected the fuzzer and spent seven minutes
+# on it before the agent narrowed the command itself.
+
+
+def _project(tmp_path, **files: str):
+    """A repository root containing the given files, plus a tests/ directory."""
+    for name, body in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_it.py").write_text("def test_x(): pass\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_tox_commands_scope_the_test_command(tmp_path) -> None:
+    root = _project(tmp_path, **{"tox.ini": "[testenv]\ncommands = python -m pytest tests\n"})
+    (root / "extra").mkdir()
+    assert _declared_test_paths(root) == ["tests"]
+    assert _test_command_for(root) == "python -m pytest -q tests"
+
+
+def test_testpaths_in_setup_cfg_is_honoured(tmp_path) -> None:
+    root = _project(tmp_path, **{"setup.cfg": "[tool:pytest]\ntestpaths = tests\n"})
+    assert _test_command_for(root) == "python -m pytest -q tests"
+
+
+def test_testpaths_in_pyproject_is_honoured(tmp_path) -> None:
+    root = _project(
+        tmp_path,
+        **{"pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'},
+    )
+    assert _test_command_for(root) == "python -m pytest -q tests"
+
+
+def test_testpaths_may_be_a_plain_string(tmp_path) -> None:
+    root = _project(tmp_path, **{"pytest.ini": "[pytest]\ntestpaths = tests\n"})
+    assert _declared_test_paths(root) == ["tests"]
+
+
+def test_a_declared_path_that_does_not_exist_is_ignored(tmp_path) -> None:
+    """A stale declaration must not produce a command that collects nothing."""
+    root = _project(tmp_path, **{"pytest.ini": "[pytest]\ntestpaths = gone\n"})
+    assert _declared_test_paths(root) == []
+    assert _test_command_for(root) == "python -m pytest -q"
+
+
+def test_a_project_that_declares_nothing_keeps_the_broad_command(tmp_path) -> None:
+    """Narrowing on a guess would quietly stop running some of the suite."""
+    root = _project(tmp_path, **{"pyproject.toml": "[project]\nname = 'x'\n"})
+    assert _declared_test_paths(root) == []
+    assert _test_command_for(root) == "python -m pytest -q"
+
+
+def test_a_flag_value_is_not_mistaken_for_a_test_path(tmp_path) -> None:
+    """`--cov jmespath` names a real directory without being a test path."""
+    root = _project(
+        tmp_path,
+        **{"tox.ini": "[testenv]\ncommands = python -m pytest --cov mypkg tests\n"},
+    )
+    (root / "mypkg").mkdir()
+    assert _declared_test_paths(root) == ["tests"]
+
+
+def test_several_declared_paths_are_all_run(tmp_path) -> None:
+    root = _project(tmp_path, **{"pytest.ini": "[pytest]\ntestpaths = tests integration\n"})
+    (root / "integration").mkdir()
+    assert _test_command_for(root) == "python -m pytest -q tests integration"
+
+
+def test_an_unparseable_config_falls_back_rather_than_raising(tmp_path) -> None:
+    root = _project(tmp_path, **{"pyproject.toml": "this is not : valid = toml ["})
+    assert _declared_test_paths(root) == []
+    assert _test_command_for(root) == "python -m pytest -q"

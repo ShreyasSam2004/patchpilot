@@ -19,10 +19,13 @@ Three properties matter more than the code volume here:
 from __future__ import annotations
 
 import asyncio
+import configparser
 import contextlib
 import json
 import re
+import shlex
 import time
+import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -100,6 +103,100 @@ _NATIVE_RUNNERS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _pytest_paths_in_command(directory: Path, line: str) -> list[str]:
+    """Path arguments of a pytest invocation inside a config's command line.
+
+    Validated against the filesystem rather than parsed as options, because the
+    flags a project passes are unknowable in general. The one case that needs
+    care is a flag's *value* -- `--cov jmespath` names a real directory without
+    being a test path -- so a token preceded by a bare flag is skipped.
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return []
+    lowered = [token.lower() for token in tokens]
+    start = next((i for i, t in enumerate(lowered) if t.endswith("pytest")), None)
+    if start is None:
+        return []
+
+    paths: list[str] = []
+    for index in range(start + 1, len(tokens)):
+        token = tokens[index]
+        previous = tokens[index - 1]
+        if token.startswith("-"):
+            continue
+        if previous.startswith("-") and "=" not in previous:
+            continue  # this is the flag's value, not a path
+        if (directory / token).exists():
+            paths.append(token)
+    return paths
+
+
+def _declared_test_paths(directory: Path) -> list[str]:
+    """Where the project itself says its tests are, or an empty list.
+
+    Detecting `tox.ini` and then running a bare `pytest` is not the same as
+    reading it. jmespath declares `commands = python -m pytest tests`, ships a
+    hypothesis fuzzing suite under `extra/` that its own runs never touch, and a
+    bare `pytest` from the repository root collected the fuzzer and spent seven
+    minutes on it.
+
+    Only an explicit declaration counts. A `tests/` directory merely existing is
+    not one -- plenty of projects keep tests beside the code as well, and
+    narrowing to a guess would quietly stop running some of them. Running too
+    much costs time; running too little produces a green that means nothing.
+    """
+    ini_sources: tuple[tuple[str, str], ...] = (
+        ("pytest.ini", "pytest"),
+        ("setup.cfg", "tool:pytest"),
+        ("tox.ini", "pytest"),
+    )
+
+    # An explicit `testpaths` is the clearest statement a project can make.
+    pyproject = directory / "pyproject.toml"
+    if pyproject.exists():
+        with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            declared = (
+                data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("testpaths")
+            )
+            if isinstance(declared, str):
+                declared = declared.split()
+            if isinstance(declared, list):
+                found = [str(p) for p in declared if (directory / str(p)).exists()]
+                if found:
+                    return found
+
+    for filename, section in ini_sources:
+        path = directory / filename
+        if not path.exists():
+            continue
+        parser = configparser.ConfigParser(interpolation=None)
+        with contextlib.suppress(OSError, configparser.Error, UnicodeDecodeError):
+            parser.read(path, encoding="utf-8")
+            if parser.has_option(section, "testpaths"):
+                declared = parser.get(section, "testpaths").split()
+                found = [p for p in declared if (directory / p).exists()]
+                if found:
+                    return found
+
+    # Failing that, the command tox actually runs is still the project speaking.
+    tox = directory / "tox.ini"
+    if tox.exists():
+        parser = configparser.ConfigParser(interpolation=None)
+        with contextlib.suppress(OSError, configparser.Error, UnicodeDecodeError):
+            parser.read(tox, encoding="utf-8")
+            for section in parser.sections():
+                if not parser.has_option(section, "commands"):
+                    continue
+                for line in parser.get(section, "commands").splitlines():
+                    found = _pytest_paths_in_command(directory, line)
+                    if found:
+                        return found
+    return []
+
+
 def _test_command_for(directory: Path, *, has_pytest: bool = True) -> str | None:
     """The test command a directory's layout implies, or None.
 
@@ -143,6 +240,9 @@ def _test_command_for(directory: Path, *, has_pytest: bool = True) -> str | None
 
     for marker in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py"):
         if (directory / marker).exists():
+            declared_paths = _declared_test_paths(directory)
+            if declared_paths:
+                return f"python -m pytest -q {' '.join(shlex.quote(p) for p in declared_paths)}"
             return "python -m pytest -q"
     for tests in ("tests", "test"):
         candidate = directory / tests
@@ -168,6 +268,13 @@ class AgentTask:
     test_command: str | None = None
     hints: str | None = None
     extra_guidance: str | None = None
+    protect_tests: bool = False
+    """Refuse writes under test paths for the whole run.
+
+    Set for benchmark runs, where the tests are the answer key. Left off for
+    ordinary repair, where a regression test alongside the fix is welcome and
+    is shown to the reviewer rather than blocked.
+    """
     seed_patch: str | None = None
     """A diff to apply to the fresh workspace before the agent starts.
 
