@@ -65,13 +65,16 @@ export default function RunPage() {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Whether the event stream should be open. Deliberately *not* derived from
+  // the run's state: see the streaming effect below.
+  const [streaming, setStreaming] = useState(false);
 
   const lastSeq = useRef(0);
   const tabChosen = useRef(false);
   const live = run !== null && !isTerminal(run.state);
 
-  const loadDetails = useCallback(async () => {
-    if (!runId) return;
+  const loadDetails = useCallback(async (): Promise<Review | null> => {
+    if (!runId) return null;
     try {
       const [d, t, c, f, h, r] = await Promise.all([
         api.getDiff(runId),
@@ -93,8 +96,10 @@ export default function RunPage() {
       if (r?.review_state === "PATCH_READY" && !tabChosen.current) {
         setTab("review");
       }
+      return r;
     } catch {
       /* panels are secondary; the run header and timeline still render */
+      return null;
     }
   }, [runId]);
 
@@ -111,6 +116,27 @@ export default function RunPage() {
     }
   }, [runId]);
 
+  /** Pick up the review once the run has finished producing it.
+   *
+   * The run reaches a terminal state *before* its patch is recorded for review:
+   * the orchestrator sets RESOLVED and emits the event, and only then is the
+   * result persisted and `record_generated_patch` called. So one fetch on the
+   * state change is a race, and losing it is what left the review invisible
+   * until a manual reload.
+   *
+   * A run with nothing worth reviewing keeps `review_state` at RUNNING forever,
+   * which is why that alone cannot be the stop condition -- hence a bounded
+   * retry rather than a wait.
+   */
+  const settleAfterFinish = useCallback(async () => {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const detail = await loadRun();
+      const found = await loadDetails();
+      if (found || !detail || detail.review_state !== "RUNNING") return;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }, [loadRun, loadDetails]);
+
   // Initial load: run, full event history, and all panels.
   useEffect(() => {
     (async () => {
@@ -124,6 +150,8 @@ export default function RunPage() {
           /* an empty timeline is better than a broken page */
         }
         await loadDetails();
+        // Opened while the run is still going: follow it to completion.
+        if (!isTerminal(detail.state)) setStreaming(true);
       }
       setLoading(false);
     })();
@@ -136,10 +164,21 @@ export default function RunPage() {
   // effect tore the EventSource down and reopened it on each of the ~15 state
   // transitions in a run. The churn (plus the browser's per-origin connection
   // limit) left the stream dead, and the timeline only appeared at the end when
-  // onDone refetched everything. `live` is a boolean, so it changes exactly
-  // once: when the run reaches a terminal state.
+  // onDone refetched everything.
+  //
+  // Nor may it contain `live`. That was the next version of the same mistake:
+  // `live` goes false the moment loadRun() sees a terminal state, so React ran
+  // the cleanup and closed the EventSource *before* the server's `done` frame
+  // arrived — and `done` is what triggers the final refresh that fetches the
+  // review. The run finished, the review existed, and the page never asked for
+  // it until someone reloaded by hand.
+  //
+  // `streaming` is latched instead: set once when a live run is opened, cleared
+  // only by `done`. The server sends that only after the run is terminal and no
+  // events remain, so the stream now closes when the conversation is actually
+  // over rather than when a derived flag flips.
   useEffect(() => {
-    if (!runId || !live) return;
+    if (!runId || !streaming) return;
 
     const stop = streamRunEvents(runId, lastSeq.current, {
       onEvent: (event) => {
@@ -165,11 +204,14 @@ export default function RunPage() {
         }
       },
       onDone: () => {
-        void loadRun().then(() => void loadDetails());
+        setStreaming(false);
+        void settleAfterFinish();
       },
     });
     return stop;
-  }, [runId, live, loadRun, loadDetails]);
+    // Every callback here is a useCallback keyed on runId, so none of them
+    // change while a run is in flight; only `streaming` can retrigger this.
+  }, [runId, streaming, loadRun, settleAfterFinish]);
 
   const decide = useCallback(
     async (kind: string, action: () => Promise<Review>) => {
