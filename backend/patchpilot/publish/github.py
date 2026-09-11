@@ -24,6 +24,7 @@ import asyncio
 import base64
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from .ports import (
     PullRequestInfo,
     RepositoryInfo,
 )
+from .verify import WORKFLOW_DIR, changed_paths, workflow_paths
 
 log = get_logger(__name__)
 
@@ -290,23 +292,24 @@ class GitHubAdapter:
         ensure_pushable(branch, default_branch=protected_default_branch)
         token = await self._credentials.bearer_token()
         workdir = Path(tempfile.mkdtemp(prefix="patchpilot-publish-"))
+        from_owner = source_owner or owner
+        from_repo = source_repo or repo
+        plan = _PushPlan(
+            workdir=workdir,
+            push_url=f"https://github.com/{owner}/{repo}.git",
+            source_url=f"https://github.com/{from_owner}/{from_repo}.git",
+            source_label=f"{from_owner}/{from_repo}",
+            branch=branch,
+            base_commit_sha=base_commit_sha,
+            patch=patch,
+            commit_message=commit_message,
+            author_name=author_name,
+            author_email=author_email,
+            token=token,
+            default_branch=protected_default_branch,
+        )
         try:
-            return await asyncio.to_thread(
-                _apply_and_push,
-                workdir,
-                owner,
-                repo,
-                branch,
-                base_commit_sha,
-                patch,
-                commit_message,
-                author_name,
-                author_email,
-                token,
-                source_owner or owner,
-                source_repo or repo,
-                protected_default_branch,
-            )
+            return await asyncio.to_thread(_apply_and_push, plan)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
@@ -406,60 +409,81 @@ def _scrub(text: str) -> str:
     return re.sub(r"(https://)[^@\s/]+@", r"\1***@", cleaned)
 
 
-def _apply_and_push(
-    workdir: Path,
-    owner: str,
-    repo: str,
-    branch: str,
-    base_commit_sha: str,
-    patch: str,
-    commit_message: str,
-    author_name: str,
-    author_email: str,
-    token: str,
-    source_owner: str,
-    source_repo: str,
-    protected_default_branch: str | None,
-) -> str:
-    """Clone, branch, apply, verify, commit, push. Returns the commit SHA.
+@dataclass(frozen=True, slots=True)
+class _PushPlan:
+    """Everything one publication push needs, resolved before git starts.
+
+    The remote URLs are fields rather than being built from ``owner/repo``
+    inside the routine. That is what lets the integration tests drive the real
+    production code against local bare repositories instead of GitHub -- the git
+    behaviour under test is then the real thing, not a reimplementation in a
+    fake.
+    """
+
+    workdir: Path
+    push_url: str
+    source_url: str
+    source_label: str
+    branch: str
+    base_commit_sha: str
+    patch: str
+    commit_message: str
+    author_name: str
+    author_email: str
+    token: str | None
+    default_branch: str | None
+
+
+def _apply_and_push(plan: _PushPlan) -> str:
+    """Clone, branch, apply, verify, commit, verify again, push. Returns the SHA.
 
     Synchronous by design and run on a worker thread: git is a subprocess, and
     interleaving these steps would make the verification meaningless.
     """
-    push_url = f"https://github.com/{owner}/{repo}.git"
-    source_url = f"https://github.com/{source_owner}/{source_repo}.git"
-
+    workdir = plan.workdir
     _git(workdir, "init", "--quiet")
-    _git(workdir, "remote", "add", "origin", push_url)
-    # Fetch only the approved base commit, from the repository that actually
-    # has it. For a fork that is upstream, not the fork: a fork created after
-    # the review may not contain the reviewed commit, and syncing it would risk
+    _git(workdir, "remote", "add", "origin", plan.push_url)
+    # Fetch only the approved base commit, from the repository that actually has
+    # it. For a fork that is upstream, not the fork: a fork created after the
+    # review may not contain the reviewed commit, and syncing it would risk
     # moving the patch onto a different revision. Fetching the exact SHA from
     # upstream sidesteps fork synchronisation entirely.
-    if source_url != push_url:
-        _git(workdir, "remote", "add", "upstream", source_url)
+    forked = plan.source_url != plan.push_url
+    if forked:
+        _git(workdir, "remote", "add", "upstream", plan.source_url)
         fetch_remote = "upstream"
     else:
         fetch_remote = "origin"
     try:
         _git(
-            workdir, "fetch", "--quiet", "--depth", "1", fetch_remote, base_commit_sha,
-            token=token,
+            workdir, "fetch", "--quiet", "--depth", "1", fetch_remote, plan.base_commit_sha,
+            token=plan.token,
         )
     except GitHostingError as exc:
         raise GitHostingError(
             PublishErrorCode.FORK_BASE_UNAVAILABLE
-            if fetch_remote == "upstream"
+            if forked
             else PublishErrorCode.BASE_COMMIT_UNKNOWN,
-            f"The approved base commit {base_commit_sha[:12]} could not be fetched "
-            f"from {source_owner}/{source_repo}. It may have been garbage collected "
+            f"The approved base commit {plan.base_commit_sha[:12]} could not be "
+            f"fetched from {plan.source_label}. It may have been garbage collected "
             "after a force-push. The patch must be regenerated and reviewed against "
             "a commit that still exists.",
         ) from exc
-    _git(workdir, "checkout", "--quiet", "-b", branch, "FETCH_HEAD")
+    _git(workdir, "checkout", "--quiet", "-b", plan.branch, "FETCH_HEAD")
 
+    # The base as git actually resolved it, not as we asked for it. Everything
+    # downstream compares against this object.
+    base_sha = _git(workdir, "rev-parse", "HEAD").strip()
+    if base_sha != plan.base_commit_sha:
+        raise GitHostingError(
+            PublishErrorCode.PUBLICATION_COMMIT_MISMATCH,
+            f"The fetched base resolved to {base_sha[:12]}, but the patch was "
+            f"approved against {plan.base_commit_sha[:12]}. Nothing was pushed.",
+        )
+
+    canonical = canonical_patch(plan.patch)
     patch_file = workdir / ".patchpilot-approved.patch"
-    patch_file.write_text(canonical_patch(patch), encoding="utf-8", newline="\n")
+    patch_file.write_text(canonical, encoding="utf-8", newline="\n")
     try:
         _git(workdir, "apply", "--whitespace=nowarn", str(patch_file))
     except GitHostingError as exc:
@@ -475,28 +499,196 @@ def _apply_and_push(
     # bytes differ for any reason, nothing is pushed.
     _git(workdir, "add", "-A")
     applied = _git(workdir, "diff", "--cached", "--no-color", "--no-ext-diff", "--unified=3")
-    if patch_digest(applied) != patch_digest(patch):
+    if patch_digest(applied) != patch_digest(plan.patch):
         raise GitHostingError(
             PublishErrorCode.APPLIED_DIFF_MISMATCH,
             "The diff produced on the branch does not match the approved patch. "
             "Nothing was pushed.",
         )
 
-    _git(workdir, "-c", f"user.name={author_name}", "-c", f"user.email={author_email}",
-         "commit", "--quiet", "-m", commit_message)
+    _git(workdir, "-c", f"user.name={plan.author_name}", "-c", f"user.email={plan.author_email}",
+         "commit", "--quiet", "-m", plan.commit_message)
     commit_sha = _git(workdir, "rev-parse", "HEAD").strip()
+
+    approved_files = _verify_commit(plan, base_sha=base_sha, commit_sha=commit_sha)
 
     # Checked once more immediately before the push, against the default branch
     # of the repository being written to. For a fork that is the fork's own
     # default, which upstream's name would not have covered.
-    ensure_pushable(branch, default_branch=protected_default_branch)
+    ensure_pushable(plan.branch, default_branch=plan.default_branch)
     try:
         # No --force, ever. A rejected push means the branch already exists with
         # different content, which is someone else's work.
-        _git(workdir, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", token=token)
+        _git(
+            workdir, "push", "--quiet", "origin", f"{plan.branch}:refs/heads/{plan.branch}",
+            token=plan.token,
+        )
     except GitHostingError as exc:
+        if _is_workflow_rejection(str(exc)):
+            raise _explain_workflow_rejection(
+                plan, base_sha=base_sha, commit_sha=commit_sha, approved_files=approved_files
+            ) from exc
         raise _classify_push_failure(exc) from exc
     return commit_sha
+
+
+def _verify_commit(plan: _PushPlan, *, base_sha: str, commit_sha: str) -> frozenset[str]:
+    """Re-check the finished commit against the approved patch, from objects.
+
+    The pre-commit check compared the *index*. This one reads the committed
+    objects back out of the repository, which is what will actually be pushed,
+    and so covers anything that could come between the two: a commit hook
+    rewriting content, a partial commit, the wrong parent.
+
+    Returns the approved file set, so the caller does not parse the patch twice.
+    """
+    workdir = plan.workdir
+
+    parent = _git(workdir, "rev-parse", f"{commit_sha}^").strip()
+    if parent != base_sha:
+        raise GitHostingError(
+            PublishErrorCode.PUBLICATION_COMMIT_MISMATCH,
+            f"The publication commit is built on {parent[:12]}, not on the approved "
+            f"base {base_sha[:12]}. Nothing was pushed.",
+        )
+
+    # Which files, before which bytes. A digest mismatch would catch everything
+    # the file comparison catches, but it cannot say *what* went wrong, and
+    # "this commit touches a workflow you did not approve" is worth saying in
+    # those words. The two oracles are independent on purpose: this side reads
+    # the approved patch's own headers, the other asks git.
+    approved_files = changed_paths(canonical_patch(plan.patch))
+    committed_files = frozenset(
+        line.strip()
+        # --no-renames so a rename lists both paths. The patch header names both
+        # sides too, and with rename detection on git would report only the
+        # destination -- which would read as a file set mismatch on any rename.
+        for line in _git(
+            workdir, "diff", "--name-only", "--no-renames", base_sha, commit_sha
+        ).splitlines()
+        if line.strip()
+    )
+
+    unapproved_workflows = workflow_paths(committed_files - approved_files)
+    if unapproved_workflows:
+        raise GitHostingError(
+            PublishErrorCode.UNAPPROVED_WORKFLOW_CHANGE,
+            "The publication commit modifies GitHub Actions workflow files that the "
+            f"approved patch does not touch: {', '.join(sorted(unapproved_workflows))}. "
+            "Nothing was pushed.",
+        )
+    if committed_files != approved_files:
+        detail = []
+        unexpected = sorted(committed_files - approved_files)
+        missing = sorted(approved_files - committed_files)
+        if unexpected:
+            detail.append(f"unexpected: {', '.join(unexpected)}")
+        if missing:
+            detail.append(f"missing: {', '.join(missing)}")
+        raise GitHostingError(
+            PublishErrorCode.UNAPPROVED_FILE_CHANGE,
+            "The publication commit changes a different set of files than the "
+            f"approved patch ({'; '.join(detail)}). Nothing was pushed.",
+        )
+
+    # The authority. Same files is not the same content.
+    committed = _git(
+        workdir, "diff", "--no-color", "--no-ext-diff", "--unified=3", base_sha, commit_sha
+    )
+    if patch_digest(committed) != patch_digest(plan.patch):
+        raise GitHostingError(
+            PublishErrorCode.PUBLICATION_COMMIT_MISMATCH,
+            "The committed diff does not match the approved patch. Nothing was pushed.",
+        )
+    return approved_files
+
+
+def _is_workflow_rejection(text: str) -> bool:
+    """Does this push failure look like GitHub's Actions permission check?
+
+    The wording differs between classic and fine-grained tokens ("without
+    `workflow` scope" versus "without `workflows` permission"), so this matches
+    the stable part: a refusal that names workflows.
+    """
+    lowered = text.lower()
+    # Match the phrase GitHub actually uses, not just the word "workflow" --
+    # which also appears in the remote URL of any repository named after one.
+    if "create or update workflow" in lowered:
+        return True
+    return "refusing to allow" in lowered and "workflow" in lowered
+
+
+def _explain_workflow_rejection(
+    plan: _PushPlan,
+    *,
+    base_sha: str,
+    commit_sha: str,
+    approved_files: frozenset[str],
+) -> GitHostingError:
+    """Say why a patch touching no workflow was refused for touching one.
+
+    GitHub does not judge this branch's own commit in isolation. The commit a
+    publication introduces is exactly ``apply(base, approved_patch)`` -- verified
+    twice above -- so when the server names a workflow file, that commit is not
+    what it is objecting to. What differs is the *tree*: a branch cut from a base
+    predating a change to a workflow file still carries the older version of it,
+    and measured against the destination's default branch that reads as
+    modifying the file.
+
+    The remedy is therefore about the base commit, not about permissions, and
+    the message says so. Granting workflow access would make this push succeed
+    while leaving PatchPilot able to rewrite CI on every future publication,
+    which is the boundary worth keeping.
+
+    Diagnosis runs only on this failure path, so a working publication pays
+    nothing for it. It is read-only, and it happens after the commit is built and
+    verified, so nothing it fetches can influence what was committed.
+    """
+    drifted = _workflow_drift(plan, commit_sha=commit_sha)
+    where = plan.default_branch or "the destination's default branch"
+    changes = ", ".join(sorted(approved_files)) or "no files"
+
+    if drifted:
+        return GitHostingError(
+            PublishErrorCode.WORKFLOW_DRIFT,
+            "GitHub refused the push because the branch differs from "
+            f"{where} in a workflow file. The approved patch touches no workflow: "
+            f"it changes only {changes}. The branch is based on {base_sha[:12]}, "
+            f"which predates changes to {', '.join(sorted(drifted))}, so pushing it "
+            "reads as reverting them. Re-approve the patch against the current head "
+            f"of {where}, or publish to a repository whose default branch matches "
+            "the reviewed base. PatchPilot deliberately does not request workflow "
+            "permission to work around this.",
+        )
+    return GitHostingError(
+        PublishErrorCode.WORKFLOW_DRIFT,
+        "GitHub refused the push for a workflow-permission reason, but the approved "
+        f"patch changes only {changes} and the publication commit was verified to "
+        "match it. This normally means the branch's base predates a workflow change "
+        f"on {where}. Re-approve the patch against a current base commit. PatchPilot "
+        "deliberately does not request workflow permission to work around this.",
+    )
+
+
+def _workflow_drift(plan: _PushPlan, *, commit_sha: str) -> frozenset[str]:
+    """Workflow files that differ between the branch and the push destination.
+
+    Best-effort: if the default branch cannot be fetched, the caller still
+    reports a useful error, just without naming files.
+    """
+    if not plan.default_branch:
+        return frozenset()
+    try:
+        _git(
+            plan.workdir, "fetch", "--quiet", "--depth", "1", "origin", plan.default_branch,
+            token=plan.token,
+        )
+        names = _git(
+            plan.workdir, "diff", "--name-only", "FETCH_HEAD", commit_sha, "--", WORKFLOW_DIR
+        )
+    except GitHostingError:
+        return frozenset()
+    return frozenset(line.strip() for line in names.splitlines() if line.strip())
 
 
 def _classify_push_failure(exc: GitHostingError) -> GitHostingError:
@@ -527,6 +719,15 @@ def _classify_push_failure(exc: GitHostingError) -> GitHostingError:
             PublishErrorCode.AUTH_FAILED,
             "GitHub rejected the credential. Check the token has not expired "
             "and was copied in full.",
+        )
+    if "shallow update not allowed" in lowered:
+        return GitHostingError(
+            PublishErrorCode.FORK_BASE_UNAVAILABLE,
+            "The destination repository does not contain the reviewed base commit, "
+            "so the branch cannot be pushed without uploading the project's entire "
+            "history. This normally means the fork is not a fork of the repository "
+            "being patched, or was created from a rewritten history. Sync the fork "
+            "with upstream and retry.",
         )
     if "protected branch" in lowered or "pre-receive hook declined" in lowered:
         return GitHostingError(

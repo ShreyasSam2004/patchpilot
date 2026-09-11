@@ -56,10 +56,18 @@ const ERROR_LABEL: Record<string, string> = {
   PATCH_DIGEST_MISMATCH: "The patch changed after approval",
   PATCH_APPLY_FAILED: "The approved patch could not be applied",
   APPLIED_DIFF_MISMATCH: "The applied diff did not match the approved patch",
+  PUBLICATION_COMMIT_MISMATCH: "The commit did not match the approved patch",
+  UNAPPROVED_FILE_CHANGE: "The commit changed files outside the approved patch",
+  UNAPPROVED_WORKFLOW_CHANGE: "Refused: the commit changed an unapproved workflow",
+  WORKFLOW_DRIFT: "Refused by GitHub: the base predates a workflow change",
   PUSH_FAILED: "Push failed",
   PR_CREATE_FAILED: "Pull request creation failed",
   RATE_LIMITED: "GitHub rate limit reached",
   PROTECTED_BRANCH: "Refused: protected branch",
+  FORK_CREATE_FAILED: "The fork could not be created",
+  FORK_NOT_READY: "The fork is still being created",
+  FORK_BASE_UNAVAILABLE: "The reviewed base commit is not available",
+  IDENTITY_UNKNOWN: "GitHub did not identify the authenticated account",
   UNKNOWN: "Publication failed",
 };
 
@@ -94,6 +102,7 @@ function Steps({ publication }: { publication: Publication }) {
     ["CHECKED_DRIFT", "Base branch checked"],
     ["VERIFIED_APPLIED_DIFF", "Applied diff matches approval"],
     ["COMMIT_CREATED", "Commit created"],
+    ["VERIFIED_COMMIT", "Commit re-verified against approval"],
     ["BRANCH_PUSHED", "Branch pushed"],
     ["PR_CREATED", "Pull request created"],
   ];

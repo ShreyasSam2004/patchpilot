@@ -438,6 +438,10 @@ class PublicationService:
             await self._record(
                 session, publication, PublicationStep.COMMIT_CREATED, commit_sha=commit_sha
             )
+            # The adapter re-reads the finished commit out of the object database
+            # and compares it, and its file set, with the approved patch. Reaching
+            # here means that passed; it cannot be reached if it did not.
+            await self._record(session, publication, PublicationStep.VERIFIED_COMMIT)
             await self._record(session, publication, PublicationStep.BRANCH_PUSHED)
             await review_service.record_audit(
                 session, run, ReviewAction.BRANCH_CREATED, version=version.version,
