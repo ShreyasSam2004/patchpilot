@@ -57,6 +57,11 @@ def build_agent_task(instance: SweBenchInstance, run_id: str) -> AgentTask:
         base_commit=instance.base_commit,
         test_command=instance.suggested_test_command(),
         hints=None,
+        # FAIL_TO_PASS and PASS_TO_PASS come from the harness, so the tests are
+        # part of the answer key here in a way they never are on a real
+        # repository. An agent that can edit them can turn any instance green
+        # without fixing anything, and the resulting score measures nothing.
+        protect_tests=True,
     )
 
 

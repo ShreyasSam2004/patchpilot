@@ -22,6 +22,7 @@ from ..fsutil import remove_tree
 from ..logging_setup import get_logger
 from ..providers.base import ModelProvider
 from ..providers.factory import create_provider
+from ..repair.progress import refuse_test_writes
 from ..sandbox.base import Sandbox
 from ..sandbox.factory import create_sandbox, limits_from_settings
 from ..sandbox.local import LocalSandbox
@@ -180,6 +181,7 @@ async def _prepare(
         local_path=task.local_path,
         base_commit=task.base_commit,
         provisioner=provisioner,
+        write_guard=refuse_test_writes if task.protect_tests else None,
     )
 
 

@@ -74,11 +74,22 @@ const ERROR_LABEL: Record<string, string> = {
 function Verification({ version }: { version: PatchVersion }) {
   const v = version.verification ?? {};
   const recognised = v.summary_recognized === true;
+  const tests = version.test_files ?? [];
   return (
     <div className="flex flex-wrap items-center gap-3 text-[12px]">
       <Badge tone={v.green ? "ok" : "bad"}>
         {v.passed ?? 0} passed · {v.failed ?? 0} failed · {v.errors ?? 0} errors
       </Badge>
+      {/* A fix that also changes a test may be exactly right — a regression
+          test beside the repair — but it is the reviewer's call, and they can
+          only make it if the screen says so. */}
+      {tests.length > 0 && (
+        <span title={tests.join(", ")}>
+          <Badge tone="warn">
+            also edits {tests.length} test file{tests.length === 1 ? "" : "s"}
+          </Badge>
+        </span>
+      )}
       <span className="text-[var(--text-muted)]">
         {v.framework && v.framework !== "unknown" ? v.framework : "runner unknown"}
       </span>

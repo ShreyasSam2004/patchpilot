@@ -86,6 +86,27 @@ def is_scratch(path: str) -> bool:
     return classify_write(path) is WriteKind.SCRATCH
 
 
+def refuse_test_writes(path: str) -> str | None:
+    """Reason to refuse a write to ``path``, or None to allow it.
+
+    Used where the tests are the answer key rather than the agent's to change --
+    a benchmark, where FAIL_TO_PASS and PASS_TO_PASS come from the harness. An
+    agent that may edit them can turn any run green without fixing anything, and
+    a score built on that measures nothing.
+
+    Deliberately not the default. On a real repository, adding a regression test
+    beside a fix is exactly what a good contributor does; there the edit is
+    surfaced to the reviewer instead of being blocked.
+    """
+    if classify_write(path) is not WriteKind.TEST:
+        return None
+    return (
+        f"refusing to modify {path}: the tests define the behaviour this run is "
+        "judged against and cannot be changed from inside it. Fix the "
+        "implementation instead."
+    )
+
+
 #: A command that exercises the project's own behaviour: an inline snippet, or a
 #: script from the scratch directory. This is what "reproducing" looks like in
 #: the trajectories -- `python -c "from sympy import ...; print(...)"`.

@@ -14,9 +14,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..diffutil import changed_paths
 from ..errors import PathEscapeError, ToolError, WorkspaceError
 from ..fsutil import remove_tree
 from ..logging_setup import get_logger
@@ -78,10 +80,33 @@ _SCRATCH_FILE = re.compile(
 class Workspace:
     """A jailed checkout plus the git operations the agent needs."""
 
-    def __init__(self, root: Path, sandbox: Sandbox) -> None:
+    def __init__(
+        self,
+        root: Path,
+        sandbox: Sandbox,
+        *,
+        write_guard: Callable[[str], str | None] | None = None,
+    ) -> None:
+        """``write_guard`` vetoes a write, returning the reason to refuse it.
+
+        It lives on the workspace rather than in the editing tools because this
+        is the only place every write passes through. A guard in `edit_file` and
+        `write_file` would leave `apply_patch` open, and the next tool that
+        writes would arrive unprotected by default.
+        """
         self.root = root.resolve()
         self.sandbox = sandbox
         self._files_read: set[str] = set()
+        self._write_guard = write_guard
+
+    def _refuse_if_guarded(self, *paths: str) -> None:
+        """Raise before touching disk if the guard rejects any of ``paths``."""
+        if self._write_guard is None:
+            return
+        for path in paths:
+            reason = self._write_guard(path)
+            if reason:
+                raise ToolError(reason, code="write_refused")
 
     # ------------------------------------------------------------------ paths
     def resolve(self, relative: str, *, must_exist: bool = False) -> Path:
@@ -139,6 +164,7 @@ class Workspace:
         return raw.decode("utf-8", errors="replace"), truncated
 
     def write_text(self, relative: str, content: str) -> Path:
+        self._refuse_if_guarded(relative)
         path = self.resolve(relative)
         if path.is_dir():
             raise ToolError(f"{self.relpath(path)} is a directory", code="is_dir")
@@ -307,6 +333,10 @@ class Workspace:
         if not diff_text.endswith("\n"):
             diff_text += "\n"
 
+        # Read the diff for its targets first. git applies a patch whole or not
+        # at all, so a guarded path anywhere in it has to stop all of it.
+        self._refuse_if_guarded(*sorted(changed_paths(diff_text)))
+
         patch_file = self.root / ".patchpilot_patch.diff"
         patch_file.write_text(diff_text, encoding="utf-8", newline="\n")
         try:
@@ -354,6 +384,7 @@ async def prepare_workspace(
     local_path: Path | None = None,
     base_commit: str | None = None,
     provisioner: Sandbox | None = None,
+    write_guard: Callable[[str], str | None] | None = None,
 ) -> Workspace:
     """Materialise a checkout at ``root`` from a URL or a local directory.
 
@@ -371,7 +402,7 @@ async def prepare_workspace(
     sandbox (it already has network) and for tests.
     """
     root.parent.mkdir(parents=True, exist_ok=True)
-    workspace = Workspace(root, sandbox)
+    workspace = Workspace(root, sandbox, write_guard=write_guard)
     network = provisioner or sandbox
 
     if local_path is not None:

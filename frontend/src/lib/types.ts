@@ -390,6 +390,8 @@ export interface PatchVersion {
   /** SHA-256 of the exact patch. Approval binds to this. */
   digest: string;
   files: string[];
+  /** The subset of `files` that are the project's own tests. */
+  test_files: string[];
   insertions: number;
   deletions: number;
   patch_quality: string;

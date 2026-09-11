@@ -18,6 +18,7 @@ from ..db.models import (
     PublicationRow,
     Run,
 )
+from ..repair.progress import WriteKind, classify_write
 
 
 # --------------------------------------------------------------------- runs
@@ -443,6 +444,14 @@ class PatchVersionOut(BaseModel):
     version: int
     digest: str
     files: list[str] = []
+    test_files: list[str] = []
+    """Which of ``files`` are the project's own tests.
+
+    Derived here rather than stored, so it is always consistent with the patch
+    and needs no migration. A fix that also changes a test may be exactly right
+    -- a regression test beside the repair -- but the reviewer is the one who
+    has to decide that, and they cannot if the screen does not say so.
+    """
     insertions: int = 0
     deletions: int = 0
     patch_quality: str = "no_patch"
@@ -464,6 +473,7 @@ class PatchVersionOut(BaseModel):
             version=row.version,
             digest=row.digest,
             files=row.files or [],
+            test_files=[p for p in (row.files or []) if classify_write(p) is WriteKind.TEST],
             insertions=row.insertions,
             deletions=row.deletions,
             patch_quality=row.patch_quality,
