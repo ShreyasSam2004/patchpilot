@@ -72,8 +72,19 @@ class PatchAssessment:
     test_files: tuple[str, ...] = ()
     scratch_files: tuple[str, ...] = ()
     added_lines: int = 0
+    removed_lines: int = 0
     debug_lines: int = 0
     notes: tuple[str, ...] = field(default=())
+
+    @property
+    def changed_files(self) -> tuple[str, ...]:
+        """Every path this diff touches, in a stable order.
+
+        Read from the diff itself, which is what makes it safe to show a
+        reviewer: the run's own list of files it edited includes scratch work
+        that never reaches the submitted patch.
+        """
+        return (*self.source_files, *self.test_files, *self.scratch_files)
 
     @property
     def is_repair(self) -> bool:
@@ -105,6 +116,7 @@ class PatchAssessment:
             "test_files": list(self.test_files),
             "scratch_files": list(self.scratch_files),
             "added_lines": self.added_lines,
+            "removed_lines": self.removed_lines,
             "debug_lines": self.debug_lines,
         }
 
@@ -117,7 +129,7 @@ def assess_patch(diff: str) -> PatchAssessment:
     source: list[str] = []
     tests: list[str] = []
     scratch: list[str] = []
-    added = debug = 0
+    added = removed = debug = 0
     source_added = source_debug = 0
     current: WriteKind | None = None
 
@@ -132,6 +144,9 @@ def assess_patch(diff: str) -> PatchAssessment:
                 tests.append(path)
             else:
                 scratch.append(path)
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            removed += 1
             continue
         if not line.startswith("+") or line.startswith("+++"):
             continue
@@ -151,6 +166,7 @@ def assess_patch(diff: str) -> PatchAssessment:
             test_files=tuple(tests),
             scratch_files=tuple(scratch),
             added_lines=added,
+            removed_lines=removed,
             debug_lines=debug,
         )
 

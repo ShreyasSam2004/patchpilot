@@ -181,6 +181,40 @@ async def test_a_generated_patch_becomes_version_one(session) -> None:
     assert version.root_cause.startswith("token_next_by")
 
 
+async def test_the_reviewer_sees_the_patchs_files_not_the_runs(session) -> None:
+    """Scratch work the agent did must not be listed against the patch.
+
+    The submitted diff already excludes `.patchpilot/` scratch files, but the
+    run's own `files_modified` still remembers them. Showing that list beside
+    the diff tells a reviewer they are approving a file that is not there.
+    """
+    run = make_run()
+    session.add(run)
+    await session.flush()
+
+    result = make_result(REAL_FIX)
+    result.files_modified = [".patchpilot/repro.py", "sqlparse/sql.py"]
+
+    version = await review_service.record_generated_patch(session, run, result)
+
+    assert version is not None
+    assert version.files == ["sqlparse/sql.py"]
+    assert ".patchpilot/repro.py" not in version.files
+
+
+async def test_the_reviewed_line_counts_describe_the_diff(session) -> None:
+    """Not the sum of every attempt the run made along the way."""
+    run = make_run()
+    session.add(run)
+    await session.flush()
+
+    version = await review_service.record_generated_patch(session, run, make_result(REAL_FIX))
+
+    assert version is not None
+    assert version.insertions == 1
+    assert version.deletions == 1
+
+
 async def test_a_patch_that_is_only_debris_never_reaches_a_reviewer(session) -> None:
     """Nobody should be asked to review a debug script."""
     run = make_run(id="run-review-debris", code="R002")

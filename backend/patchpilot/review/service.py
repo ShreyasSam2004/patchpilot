@@ -137,9 +137,14 @@ async def record_generated_patch(
         version=version,
         diff=result.final_patch,
         digest=digest,
-        files=list(result.files_modified),
-        insertions=sum(p.insertions for p in result.patch_attempts),
-        deletions=sum(p.deletions for p in result.patch_attempts),
+        # From the patch, not from the run. `files_modified` is everything the
+        # agent touched, including scratch work that the submitted diff excludes,
+        # and the per-attempt counts sum every attempt rather than describing the
+        # diff that is actually up for review. A reviewer deciding whether to
+        # publish needs the shape of the bytes in front of them.
+        files=list(assessment.changed_files),
+        insertions=assessment.added_lines,
+        deletions=assessment.removed_lines,
         patch_quality=str(assessment.quality),
         verification={
             "passed": last_test.passed if last_test else 0,
