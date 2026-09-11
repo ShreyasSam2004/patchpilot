@@ -363,3 +363,56 @@ def test_outcome_defaults_are_not_a_verified_state() -> None:
     assert blank.parsed is False
     assert blank.has_failures is False
     assert blank.green is True, "exit 0 by default; `parsed` is the real gate"
+
+
+# --- A run long enough for pytest to print an elapsed time --------------------
+#
+# Found in production, not imagined: a jmespath publication ran the project's
+# hypothesis fuzzing suite, which took seven minutes and passed. Because pytest
+# appends "(0:07:06)" once a run reaches a minute, the summary line stopped
+# matching and 998 green tests were recorded as `framework=unknown, passed=0`.
+# The agent was told its tests produced nothing and spent iterations re-running
+# them. Slow suites are exactly where this must not happen.
+
+REAL_JMESPATH_TAIL = """\
+tests/test_lexer.py: 3 warnings
+  /workspace/jmespath/lexer.py:169: PendingDeprecationWarning: deprecated string literal syntax
+    warnings.warn("deprecated string literal syntax",
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+998 passed, 1 skipped, 18 warnings in 426.92s (0:07:06)
+"""
+
+
+def test_a_long_run_with_an_elapsed_suffix_is_recognised() -> None:
+    outcome = parse_test_output(REAL_JMESPATH_TAIL, "", 0)
+    assert outcome.framework == "pytest"
+    assert outcome.parsed is True
+    assert (outcome.passed, outcome.failed, outcome.skipped) == (998, 0, 1)
+    assert outcome.green is True
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        ("998 passed, 1 skipped in 426.92s (0:07:06)", (998, 0, 1)),
+        ("998 passed, 1 skipped, 18 warnings in 426.92s (0:07:06)", (998, 0, 1)),
+        ("===== 2 failed, 183 passed in 120.00s (0:02:00) =====", (183, 2, 0)),
+        ("1 failed, 4 passed in 3601.00s (1:00:01)", (4, 1, 0)),
+        ("5 passed in 90000.00s (1 day, 1:00:00)", (5, 0, 0)),
+    ],
+)
+def test_the_elapsed_suffix_never_hides_the_counts(
+    summary: str, expected: tuple[int, int, int]
+) -> None:
+    outcome = parse_test_output(summary, "", 0)
+    assert outcome.framework == "pytest"
+    assert outcome.parsed is True
+    assert (outcome.passed, outcome.failed, outcome.skipped) == expected
+
+
+def test_no_tests_ran_still_parses_with_an_elapsed_suffix() -> None:
+    outcome = parse_test_output("no tests ran in 61.00s (0:01:01)", "", 5)
+    assert outcome.framework == "pytest"
+    assert outcome.parsed is True
+    assert outcome.passed == 0

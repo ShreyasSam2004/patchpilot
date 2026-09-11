@@ -19,9 +19,16 @@ from dataclasses import dataclass, field
 # The undecorated form is the one that matters most in practice, because an
 # agent almost always runs pytest quietly.
 _COUNT_WORD = r"passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun"
+# Once a run reaches a minute pytest appends a human-readable elapsed time --
+# "998 passed in 426.92s (0:07:06)". It is the tail of the same line, so a
+# pattern anchored at the end stops matching without it, and a green run of a
+# thousand tests is read as no tests at all. That failure lands precisely on the
+# slow, large repositories where the verification matters most.
+_PYTEST_ELAPSED = r"(?:\s*\((?:\d+\s+days?,\s*)?\d+:\d{2}:\d{2}\))?"
+_PYTEST_DURATION = rf"(?:\s*in\s+[\d.]+\s*s\S*{_PYTEST_ELAPSED})?"
 _PYTEST_SUMMARY = re.compile(
-    rf"^[=\s]*(?P<body>(?:\d+\s+(?:{_COUNT_WORD})(?:\s*,\s*)?)+(?:\s*in\s+[\d.]+\s*s\S*)?)[=\s]*$"
-    rf"|^[=\s]*(?P<empty>no tests ran(?:\s+in\s+[\d.]+\s*s\S*)?)[=\s]*$",
+    rf"^[=\s]*(?P<body>(?:\d+\s+(?:{_COUNT_WORD})(?:\s*,\s*)?)+{_PYTEST_DURATION})[=\s]*$"
+    rf"|^[=\s]*(?P<empty>no tests ran{_PYTEST_DURATION})[=\s]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _PYTEST_COUNT = re.compile(r"(\d+)\s+(passed|failed|errors?|skipped|xfailed|xpassed|deselected)")
