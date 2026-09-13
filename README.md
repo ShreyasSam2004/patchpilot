@@ -286,6 +286,29 @@ cd frontend && npm run dev
 
 Open <http://localhost:3000>.
 
+### Starting both at once (Windows)
+
+`scripts/start-patchpilot.ps1` brings up the API and the built UI together and
+waits until both answer. It starts each half only if its port is free, so
+running it twice does nothing rather than launching a second copy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-patchpilot.ps1
+powershell -ExecutionPolicy Bypass -File scripts\stop-patchpilot.ps1
+```
+
+It serves the production build, so run `npm run build` in `frontend/` after
+changing UI code. Logs go to `logs/`.
+
+To have PatchPilot come back on its own after a restart, register it as a logon
+task — a per-user Scheduled Task, so it needs no administrator rights and runs
+as you, with your `.env`, `PATH` and Docker:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1
+powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1 -Remove
+```
+
 For production, run the worker as its own process and turn the embedded one off:
 
 ```bash
