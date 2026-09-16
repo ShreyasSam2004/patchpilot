@@ -144,7 +144,13 @@ class LocalSandbox(Sandbox):
         process_env["PWD"] = str(workdir)
 
         kwargs: dict[str, object] = {}
-        if _IS_WINDOWS:
+        # `sys.platform` is compared directly rather than through _IS_WINDOWS:
+        # mypy only treats a branch as platform-unreachable when it can see the
+        # comparison itself, so behind a boolean it type-checks this line on
+        # Linux too -- where `subprocess.CREATE_NEW_PROCESS_GROUP` genuinely
+        # does not exist, and the build fails. Same runtime behaviour; keep the
+        # comparison inline.
+        if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True  # own process group -> killpg works
