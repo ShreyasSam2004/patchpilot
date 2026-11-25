@@ -15,9 +15,12 @@ import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
+import sqlalchemy as sa
+
 from ..agent.orchestrator import AgentTask
 from ..agent.session import SessionConfig, agent_session
 from ..config import Settings, get_settings
+from ..db.models import Event as EventRow
 from ..db.models import Run
 from ..db.session import session_scope
 from ..domain.enums import ReviewState, RunState
@@ -119,6 +122,14 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
         if run is None:
             log.warning("worker.run_missing", run_id=run_id)
             return
+        if run.cancel_requested:
+            # Cancelled between the claim and now. Starting would clone the
+            # repository and pay for model calls before the heartbeat noticed.
+            run.state = str(RunState.CANCELLED)
+            run.stop_reason = "cancelled before it started"
+            run.finished_at = datetime.now(UTC)
+            log.info("worker.cancelled_before_start", run_id=run_id)
+            return
 
         # A run coming back after "request revision" restarts from the patch the
         # reviewer saw, not from an empty tree, so the agent refines the
@@ -132,6 +143,13 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
         task = _to_agent_task(run, seed_patch=seed)
         stored = run.config or {}
         image = stored.get("docker_image")
+        # Read from the event log itself rather than `runs.last_seq`, which a
+        # failed sink write can leave behind the truth.
+        last_seq = (
+            await session.execute(
+                sa.select(sa.func.max(EventRow.seq)).where(EventRow.run_id == run_id)
+            )
+        ).scalar_one_or_none() or 0
         config = SessionConfig(
             provider=run.provider,
             model=run.model,
@@ -140,16 +158,22 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
             # so changing the default in .env still applies to old queued runs.
             docker_image=image if image and image != settings.docker_image else None,
             pull_image=bool(image) and image != settings.docker_image,
-            allow_sandbox_fallback=True,
+            # Never trade the configured isolation for convenience. A run that
+            # asked for Docker and cannot have it fails, with the reason and
+            # the remedy, rather than running repository code on the host.
+            allow_sandbox_fallback=False,
+            event_seq_start=int(last_seq),
         )
 
     sink = DatabaseSink(run_id, settings)
     heartbeat_task: asyncio.Task | None = None
+    started = False
 
     try:
         async with agent_session(
             task, settings=settings, config=config, sinks=[sink]
         ) as orchestrator:
+            started = True
             heartbeat_task = asyncio.create_task(_heartbeat_loop(run_id, orchestrator, settings))
             result = await orchestrator.run()
 
@@ -169,7 +193,11 @@ async def execute_run(run_id: str, settings: Settings | None = None) -> None:
             if failed is not None and not RunState(failed.state).is_terminal:
                 failed.state = str(RunState.FAILED)
                 failed.error = f"{type(exc).__name__}: {exc}"
-                failed.stop_reason = "worker error"
+                # Setup failures -- no Docker, a clone that failed, no API key --
+                # are the user's to fix, and the reason is the useful part.
+                failed.stop_reason = (
+                    "worker error" if started else f"run could not start: {exc}"
+                )
                 failed.finished_at = datetime.now(UTC)
     finally:
         if heartbeat_task is not None:

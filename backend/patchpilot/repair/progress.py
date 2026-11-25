@@ -31,6 +31,7 @@ runs.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -68,10 +69,14 @@ class WriteKind(StrEnum):
 
 
 def classify_write(path: str) -> WriteKind:
-    """Decide what a written path is, from the path alone."""
-    normalised = path.replace(chr(92), "/")
-    while normalised.startswith("./"):
-        normalised = normalised[2:]  # prefix strip; lstrip("./") would eat the dot
+    """Decide what a written path is, from the path alone.
+
+    ``..`` is resolved first, because that is what the workspace does before it
+    writes. Classifying the raw string let `.patchpilot/../tests/test_x.py`
+    pass as scratch space and land on a test file, straight through the
+    benchmark's test-write guard.
+    """
+    normalised = posixpath.normpath(path.replace(chr(92), "/"))
     if normalised.startswith(SCRATCH_PREFIXES):
         return WriteKind.SCRATCH
     if "/" not in normalised and SCRATCH_FILE.match(normalised):

@@ -219,7 +219,11 @@ export default function RunPage() {
       setReviewError(null);
       try {
         setReview(await action());
-        await loadRun();
+        const detail = await loadRun();
+        // A revision puts the run back in the queue. The stream was closed by
+        // the first execution's `done`, so re-latch it to follow the re-run
+        // live instead of sitting on PENDING until someone reloads.
+        if (detail && !isTerminal(detail.state)) setStreaming(true);
       } catch (err) {
         setReviewError(err instanceof ApiError ? err.message : String(err));
         // Re-read: a refused decision usually means our view was stale.
@@ -231,14 +235,13 @@ export default function RunPage() {
     [runId, loadRun],
   );
 
+  // The digest we rendered. If the patch moved underneath us the server
+  // refuses rather than approving something the reviewer never saw.
+  const renderedDigest = review?.current?.digest ?? null;
   const onApprove = useCallback(
     () =>
-      decide("approve", () =>
-        // The digest we rendered. If the patch moved underneath us the server
-        // refuses rather than approving something the reviewer never saw.
-        api.approveReview(runId, { expected_digest: review?.current?.digest ?? null }),
-      ),
-    [decide, runId, review],
+      decide("approve", () => api.approveReview(runId, { expected_digest: renderedDigest })),
+    [decide, runId, renderedDigest],
   );
 
   const onRequestRevision = useCallback(

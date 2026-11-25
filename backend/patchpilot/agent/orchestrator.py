@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..diffutil import changed_paths
 from ..domain.enums import TOOL_STATE_MAP, FailureClass, RunState
 from ..errors import ProviderError
 from ..events.bus import EventBus, RunEmitter
@@ -82,6 +83,20 @@ _SKIP_DIRS = frozenset(
 #: agent report "Error: no test specified" instead of running the suite the
 #: repository actually has -- a very common state for young projects.
 _NPM_PLACEHOLDER_TEST = re.compile(r"no test specified", re.IGNORECASE)
+
+#: Stop reasons meaning the reply hit the output-token limit (Anthropic, OpenAI).
+#: Only the last block of such a reply can be cut off, and when that block is a
+#: tool call its arguments may be incomplete: a `write_file` would write half a
+#: file. That call is answered with an error instead of being run.
+_TRUNCATED_STOPS: frozenset[str] = frozenset({"max_tokens", "length"})
+
+_TRUNCATED_CALL_MESSAGE = (
+    "ERROR: your previous reply hit the output-token limit before this call's "
+    "arguments were complete, so it was NOT run. Issue it again. For a large "
+    "change, use edit_file or apply_patch on the specific region rather than "
+    "write_file with a whole file."
+)
+
 
 #: JS test runners, in the order we prefer them when the npm script is unusable.
 _JS_RUNNERS: tuple[tuple[str, str], ...] = (
@@ -460,6 +475,11 @@ class AgentOrchestrator:
                 patch_file.unlink(missing_ok=True)
 
         if result.ok:
+            # The restored patch is this run's change from the base. Without
+            # recording it, a green run that re-verifies the reviewed patch was
+            # discarded as "not after an edit", and the revision went back to
+            # the reviewer marked as unverified.
+            self._files_modified.update(changed_paths(diff))
             await self.emitter.warning(
                 "restored the previously reviewed patch for revision",
                 bytes=len(diff),
@@ -571,7 +591,11 @@ class AgentOrchestrator:
                 continue
 
             files_before = len(self.progress.files_seen)
-            mutated = await self._execute_tool_calls(response.tool_calls, iteration)
+            mutated = await self._execute_tool_calls(
+                response.tool_calls,
+                iteration,
+                truncated=response.stop_reason in _TRUNCATED_STOPS,
+            )
 
             if self.tool_state.get("finish_requested"):
                 await self._handle_finish()
@@ -625,7 +649,11 @@ class AgentOrchestrator:
         if not response.tool_calls:
             return False
 
-        await self._execute_tool_calls(response.tool_calls, self.budget.iterations)
+        await self._execute_tool_calls(
+            response.tool_calls,
+            self.budget.iterations,
+            truncated=response.stop_reason in _TRUNCATED_STOPS,
+        )
         if self.tool_state.get("finish_requested"):
             await self._handle_finish()
             return True
@@ -667,12 +695,35 @@ class AgentOrchestrator:
         )
         return response
 
-    async def _execute_tool_calls(self, calls: list[Any], iteration: int) -> bool:
-        """Run every requested tool, emit events, and return whether code changed."""
+    async def _execute_tool_calls(
+        self, calls: list[Any], iteration: int, *, truncated: bool = False
+    ) -> bool:
+        """Run every requested tool, emit events, and return whether code changed.
+
+        ``truncated`` means the reply was cut off by the output-token limit, so
+        the final call's arguments cannot be trusted. It is answered, keeping
+        the transcript well-formed, but never executed.
+        """
         results: list[ToolCallResult] = []
         mutated = False
 
-        for call in calls:
+        for position, call in enumerate(calls):
+            if truncated and position == len(calls) - 1:
+                await self.emitter.warning(
+                    "the model's reply was cut off mid tool call; that call was not run",
+                    tool=call.name,
+                    max_output_tokens=self.settings.max_output_tokens,
+                )
+                results.append(
+                    ToolCallResult(
+                        id=call.id,
+                        name=call.name,
+                        content=_TRUNCATED_CALL_MESSAGE,
+                        is_error=True,
+                    )
+                )
+                break
+
             self.budget.record_tool_call()
             await self._set_state(TOOL_STATE_MAP.get(call.name, RunState.ANALYZING))
             await self.emitter.tool_called(

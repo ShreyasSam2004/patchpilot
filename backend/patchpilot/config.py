@@ -8,6 +8,7 @@ Nothing in this module ever writes a secret to a log or an API response; see
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -205,11 +206,23 @@ class Settings(BaseSettings):
                 provider = name.split("_")[0]
                 resolved = value or self.api_key_for(provider)
                 out[name] = "set" if resolved else None
+            elif name.endswith("_url") and isinstance(value, str):
+                # A database or proxy URL can carry a password in its userinfo
+                # (docker-compose's Postgres URL does). Keep the shape, drop it.
+                out[name] = _mask_url_password(value)
             elif isinstance(value, Path):
                 out[name] = str(value)
             else:
                 out[name] = value
         return out
+
+
+_URL_PASSWORD = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
+
+
+def _mask_url_password(url: str) -> str:
+    """``scheme://user:secret@host`` -> ``scheme://user:***@host``."""
+    return _URL_PASSWORD.sub(r"\1***@", url)
 
 
 @lru_cache(maxsize=1)

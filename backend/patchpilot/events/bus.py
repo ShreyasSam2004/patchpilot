@@ -108,10 +108,19 @@ class EventBus:
     logged and the agent continues.
     """
 
-    def __init__(self, run_id: str, sinks: list[EventSink] | None = None) -> None:
+    def __init__(
+        self, run_id: str, sinks: list[EventSink] | None = None, *, start_seq: int = 0
+    ) -> None:
+        """``start_seq`` is the last number already used by this run's history.
+
+        A run id can execute more than once -- a reviewer's revision requeues
+        it, and so does recovery from a crashed worker. Event numbers are unique
+        per run, so a second execution numbering from 1 again collides with the
+        first, and every insert is rejected (and, by design, swallowed below).
+        """
         self.run_id = run_id
         self.sinks: list[EventSink] = list(sinks or [])
-        self._seq = 0
+        self._seq = max(0, start_seq)
         self._lock = asyncio.Lock()
 
     def add_sink(self, sink: EventSink) -> None:

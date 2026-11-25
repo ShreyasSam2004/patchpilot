@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import {
@@ -31,6 +32,7 @@ interface Preflight {
 }
 
 export default function BenchmarksPage() {
+  const router = useRouter();
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -98,8 +100,9 @@ export default function BenchmarksPage() {
         evaluate: form.evaluate === "true",
       });
       setShowForm(false);
-      await load();
-      window.location.href = `/benchmarks/${created.id}`;
+      // Client-side navigation: a full reload threw away the app shell and
+      // refetched everything just to open the page for the new batch.
+      router.push(`/benchmarks/${created.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     } finally {

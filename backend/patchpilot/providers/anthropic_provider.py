@@ -122,7 +122,15 @@ class AnthropicProvider(ModelProvider):
             cache_read_tokens=getattr(raw_usage, "cache_read_input_tokens", 0) or 0,
             cache_write_tokens=getattr(raw_usage, "cache_creation_input_tokens", 0) or 0,
         )
-        usage.cost_usd = estimate_cost(self.model, usage.input_tokens, usage.output_tokens)
+        # `input_tokens` excludes everything served from or written to the cache
+        # (the system prompt, every turn), so those are billed separately.
+        usage.cost_usd = estimate_cost(
+            self.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
         self._record(usage)
 
         return ModelResponse(

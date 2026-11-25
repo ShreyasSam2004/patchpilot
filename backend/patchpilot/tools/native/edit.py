@@ -30,6 +30,10 @@ def _looks_like_unified_diff(text: str) -> bool:
     return "@@" in text and ("--- " in text or "diff --git" in text)
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
 class ApplyPatchTool(Tool[ApplyPatchArgs]):
     name = "apply_patch"
     description = (
@@ -128,8 +132,28 @@ class EditFileTool(Tool[EditFileArgs]):
         if target.is_dir():
             raise ToolError(f"{args.path} is a directory", code="is_dir")
 
-        original = target.read_text(encoding="utf-8", errors="replace")
-        occurrences = original.count(args.old_string)
+        # Exact bytes, decoded strictly. Reading with universal newlines and
+        # writing back with `\n` turned every CRLF file into an LF one, so a
+        # one-line edit showed as a whole-file rewrite; `errors="replace"`
+        # silently rewrote every non-UTF-8 byte in the file as U+FFFD.
+        try:
+            original = target.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ToolError(
+                f"{args.path} is not valid UTF-8, and rewriting it as text would corrupt "
+                "it. Use apply_patch for this file.",
+                code="not_utf8",
+            ) from exc
+
+        old_string, new_string = args.old_string, args.new_string
+        if "\r\n" in original:
+            # read_file shows lines without their terminators, so the model's
+            # strings use `\n`. Match, and write, in the file's own convention.
+            crlf_old = _to_crlf(old_string)
+            if crlf_old in original:
+                old_string, new_string = crlf_old, _to_crlf(new_string)
+
+        occurrences = original.count(old_string)
 
         if occurrences == 0:
             raise ToolError(
@@ -145,9 +169,9 @@ class EditFileTool(Tool[EditFileArgs]):
             )
 
         updated = (
-            original.replace(args.old_string, args.new_string)
+            original.replace(old_string, new_string)
             if args.replace_all
-            else original.replace(args.old_string, args.new_string, 1)
+            else original.replace(old_string, new_string, 1)
         )
         if updated == original:
             raise ToolError("replacement produced no change", code="noop_edit")

@@ -19,6 +19,7 @@ Security posture:
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +35,7 @@ log = get_logger(__name__)
 
 MAX_DESCRIPTION_CHARS = 2000
 MCP_CALL_TIMEOUT_S = 120.0
+MCP_CONNECT_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -160,8 +162,19 @@ class McpTool(Tool):
             if isinstance(args, _Passthrough)
             else args.model_dump(exclude_none=True)
         )
+        # `Tool.run` does not enforce `timeout_s`: native tools are bounded by
+        # their sandbox. An MCP call is bounded by nothing else, and one that
+        # never answers would hold the run forever while its heartbeat kept it
+        # looking alive.
         try:
-            response = await self._session.call_tool(self.remote_name, arguments)
+            async with asyncio.timeout(self.timeout_s):
+                response = await self._session.call_tool(self.remote_name, arguments)
+        except TimeoutError as exc:
+            raise ToolError(
+                f"MCP server {self.server!r} did not answer {self.remote_name!r} "
+                f"within {self.timeout_s:.0f}s",
+                code="mcp_timeout",
+            ) from exc
         except Exception as exc:
             raise ToolError(
                 f"MCP server {self.server!r} failed to run {self.remote_name!r}: {exc}",
@@ -259,9 +272,11 @@ class McpSession:
         )
         read, write = await self._stack.enter_async_context(stdio_client(params))
         self._session = await self._stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
-
-        listed = await self._session.list_tools()
+        # A server that starts but never answers must not hang run start-up or
+        # the status page; the caller closes the session and skips the server.
+        async with asyncio.timeout(MCP_CONNECT_TIMEOUT_S):
+            await self._session.initialize()
+            listed = await self._session.list_tools()
         self.tools = [
             McpTool(
                 session=self._session,

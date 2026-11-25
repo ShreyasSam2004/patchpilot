@@ -71,6 +71,24 @@ async def test_config_never_exposes_a_key(client, monkeypatch) -> None:
     assert "sk-super-secret-value" not in body
 
 
+def test_config_never_exposes_a_database_password() -> None:
+    """docker-compose's Postgres URL carries its password in the userinfo."""
+    from patchpilot.config import Settings
+
+    settings = Settings(
+        database_url="postgresql+asyncpg://patchpilot:hunter2-db@db:5432/patchpilot",
+        anthropic_base_url="https://proxy-user:proxy-pass@proxy.example/v1",
+    )
+    redacted = settings.redacted()
+    assert "hunter2-db" not in json.dumps(redacted)
+    assert "proxy-pass" not in json.dumps(redacted)
+    assert redacted["database_url"] == "postgresql+asyncpg://patchpilot:***@db:5432/patchpilot"
+    # A URL with no credentials is left exactly as configured.
+    assert Settings(database_url="sqlite+aiosqlite:///./x.db").redacted()["database_url"] == (
+        "sqlite+aiosqlite:///./x.db"
+    )
+
+
 async def test_fixtures_endpoint(client) -> None:
     response = await client.get("/api/runs/fixtures")
     assert response.status_code == 200

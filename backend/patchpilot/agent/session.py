@@ -49,8 +49,17 @@ class SessionConfig:
     official per-instance SWE-bench image so the agent can actually run the
     repository's tests."""
     pull_image: bool = False
-    allow_sandbox_fallback: bool = True
+    allow_sandbox_fallback: bool = False
+    """Degrade a requested docker sandbox to local execution if Docker is down.
+
+    Off by default, matching the sandbox factory: a run configured for
+    container isolation must not quietly execute repository code on the host.
+    Without Docker the run fails with the reason and the fix, and an operator
+    who wants local execution asks for it explicitly."""
     keep_workspace: bool = False
+    event_seq_start: int = 0
+    """Last event number this run id has already recorded, so a re-execution
+    (a revision, or recovery from a crashed worker) continues the sequence."""
     policy: ToolPolicy | None = None
     extra_tools: Sequence[Tool] = ()
     mcp_enabled: bool | None = None
@@ -116,7 +125,7 @@ async def agent_session(
     owns_provider = provider is None
     mcp_sessions: list[Any] = []
 
-    bus = EventBus(task.run_id, [LoggingSink(), *sinks])
+    bus = EventBus(task.run_id, [LoggingSink(), *sinks], start_seq=config.event_seq_start)
 
     try:
         sandbox = await create_sandbox(

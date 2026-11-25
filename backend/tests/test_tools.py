@@ -141,6 +141,30 @@ def test_native_tool_wins_a_name_collision() -> None:
     assert registry.get("read_file").origin is ToolOrigin.NATIVE
 
 
+async def test_an_mcp_call_that_never_answers_times_out(tool_ctx: ToolContext) -> None:
+    """Nothing else bounds a remote call, so the tool must.
+
+    Without this a hung server held the run forever: the budget is only checked
+    between iterations, and the heartbeat kept the run looking alive.
+    """
+    import asyncio
+
+    from patchpilot.tools.mcp.client import McpTool
+
+    class SilentSession:
+        async def call_tool(self, name, arguments):
+            await asyncio.sleep(3600)
+
+    tool = McpTool(
+        session=SilentSession(), server="demo", name="lookup", description="", input_schema={}
+    )
+    tool.timeout_s = 0.05
+    result = await tool.run(tool_ctx, {})
+    assert not result.ok
+    assert result.error_code == "mcp_timeout"
+    assert "did not answer" in result.content
+
+
 def test_reapplying_a_policy_updates_every_tool() -> None:
     registry = ToolRegistry(policy=ToolPolicy.permissive())
     registry.register_all(build_native_tools())
@@ -226,6 +250,56 @@ async def test_edit_file_replaces_exact_text(registry: ToolRegistry, tool_ctx: T
     assert result.ok, result.content
     content = tool_ctx.workspace.resolve("src/calc.py").read_text(encoding="utf-8")
     assert "return None" in content
+
+
+async def test_edit_file_keeps_a_crlf_files_line_endings(
+    registry: ToolRegistry, tool_ctx: ToolContext
+) -> None:
+    """A one-line edit to a CRLF file must not rewrite every line ending.
+
+    The model sees lines without terminators, so its strings use `\\n`; the
+    file's own convention has to survive the round trip, or the diff (and the
+    review, and the pull request) shows the whole file as changed.
+    """
+    workspace = tool_ctx.workspace
+    await workspace.git("config", "core.autocrlf", "false")  # host config must not mask it
+    path = workspace.root / "win.py"
+    path.write_bytes(b"def f(x):\r\n    if x:\r\n        return 1\r\n    return 0\r\n")
+    await workspace.git("add", "win.py")
+    await workspace.git("commit", "--quiet", "-m", "crlf file")
+
+    result = await registry.call(
+        "edit_file",
+        tool_ctx,
+        {
+            "path": "win.py",
+            "old_string": "    if x:\n        return 1",
+            "new_string": "    if x:\n        return 2",
+        },
+    )
+    assert result.ok, result.content
+    assert path.read_bytes() == b"def f(x):\r\n    if x:\r\n        return 2\r\n    return 0\r\n"
+    # Scoped to this file: the shared fixture's other files were committed
+    # under the host's own autocrlf setting, which this test just overrode.
+    numstat = await workspace.git("diff", "HEAD", "--numstat", "--", "win.py")
+    assert numstat.stdout.split()[:2] == ["1", "1"], numstat.stdout
+
+
+async def test_edit_file_refuses_to_rewrite_a_non_utf8_file(
+    registry: ToolRegistry, tool_ctx: ToolContext
+) -> None:
+    """Decoding with replacement and writing back corrupts every other byte."""
+    path = tool_ctx.workspace.root / "legacy.py"
+    original = "# caf\xe9\nvalue = 1\n".encode("latin-1")
+    path.write_bytes(original)
+    result = await registry.call(
+        "edit_file",
+        tool_ctx,
+        {"path": "legacy.py", "old_string": "value = 1", "new_string": "value = 2"},
+    )
+    assert not result.ok
+    assert result.error_code == "not_utf8"
+    assert path.read_bytes() == original
 
 
 async def test_edit_file_refuses_an_ambiguous_anchor(

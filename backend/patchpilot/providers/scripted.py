@@ -30,6 +30,8 @@ class ScriptedTurn:
 
     text: str = ""
     tool_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    stop_reason: str | None = None
+    """Override the stop reason, e.g. ``max_tokens`` to simulate a cut-off turn."""
 
     def to_response(self, model: str, index: int) -> ModelResponse:
         return ModelResponse(
@@ -39,7 +41,7 @@ class ScriptedTurn:
                 for i, (name, args) in enumerate(self.tool_calls)
             ],
             usage=Usage(input_tokens=100, output_tokens=50, cost_usd=0.0),
-            stop_reason="tool_use" if self.tool_calls else "end_turn",
+            stop_reason=self.stop_reason or ("tool_use" if self.tool_calls else "end_turn"),
             model=model,
         )
 

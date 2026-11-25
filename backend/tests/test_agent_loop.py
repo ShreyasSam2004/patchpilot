@@ -381,6 +381,50 @@ async def test_finish_is_refused_when_tests_are_red(settings, tmp_path) -> None:
     assert str(result.failure_class) == "REGRESSION"
 
 
+async def test_a_tool_call_cut_off_by_max_tokens_is_not_run(settings, tmp_path) -> None:
+    """A reply that hit the output limit may end in a half-written tool call.
+
+    Running it would write half a file. Complete calls before it still run; the
+    cut-off one is answered with an error so the model re-issues it.
+    """
+    settings.workspace_root = tmp_path / "ws"
+    settings.max_iterations = 4
+    observations: list[str] = []
+
+    def responder(messages, index):
+        if index == 0:
+            return ScriptedTurn(
+                text="Reading, then rewriting the module.",
+                tool_calls=[
+                    ("read_file", {"path": "src/calculator.py"}),
+                    ("write_file", {"path": "src/calculator.py", "content": "def divide(a, b):\n"}),
+                ],
+                stop_reason="max_tokens",
+            )
+        observations.append(last_tool_output(messages, "write_file"))
+        observations.append(last_tool_output(messages, "read_file"))
+        return ScriptedTurn(
+            tool_calls=[("finish", {"resolved": False, "summary": "stopping after the cut-off"})]
+        )
+
+    sink = MemorySink()
+    result = await run_agent_task(
+        make_task("calculator_bug", "run-truncated"),
+        settings=settings,
+        config=SessionConfig(sandbox="local"),
+        provider=ScriptedProvider(responder=responder),
+        sinks=[sink],
+    )
+    write_result, read_result = observations
+    assert "NOT run" in write_result
+    assert "src/calculator.py" in read_result, "complete calls before the cut still run"
+    assert not result.final_patch.strip(), "the truncated write must not reach the file"
+    assert [c.tool for c in result.tool_calls] == ["read_file", "finish"]
+    assert any(
+        "cut off" in str(e.payload.get("message")) for e in sink.of_type(EventType.WARNING)
+    )
+
+
 async def test_finish_is_refused_when_nothing_was_changed(settings, tmp_path) -> None:
     """Claiming success without touching the code is rejected outright."""
     settings.workspace_root = tmp_path / "ws"

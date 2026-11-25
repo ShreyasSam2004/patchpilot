@@ -38,7 +38,8 @@ services:
       PATCHPILOT_ANTHROPIC_API_KEY: ${PATCHPILOT_ANTHROPIC_API_KEY:-}
       PATCHPILOT_OPENAI_API_KEY: ${PATCHPILOT_OPENAI_API_KEY:-}
     ports:
-      - "8000:8000"
+      # Loopback only: the API has no authentication. See docs/SECURITY.md.
+      - "127.0.0.1:8000:8000"
     volumes:
       - workspaces:/app/workspaces
       - benchdata:/app/data
@@ -72,7 +73,8 @@ services:
     environment:
       PATCHPILOT_API_URL: http://api:8000
     ports:
-      - "3000:3000"
+      # Loopback only: /api is proxied straight through to the API above.
+      - "127.0.0.1:3000:3000"
     depends_on:
       - api
 

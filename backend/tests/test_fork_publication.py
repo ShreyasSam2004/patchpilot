@@ -668,3 +668,58 @@ async def test_a_base_commit_that_no_longer_exists_stops_publication(
     assert publication.error_code == str(PublishErrorCode.BASE_COMMIT_UNKNOWN)
     assert host.pushed == []
     assert publication.pr_number is None
+
+
+# ------------------------------------------------ the adapter's own HTTP query
+
+
+@pytest.mark.parametrize(
+    ("head", "expected"),
+    [
+        # Direct publication: an unqualified branch, qualified with upstream.
+        ("patchpilot/fix-42", f"{UPSTREAM_OWNER}:patchpilot/fix-42"),
+        # Fork publication: already `owner:branch`, and must stay that way.
+        (f"{USER}:patchpilot/fix-42", f"{USER}:patchpilot/fix-42"),
+    ],
+)
+async def test_the_adapter_looks_up_the_pull_request_by_its_real_head(
+    settings, head: str, expected: str
+) -> None:
+    """The recording double above ignores the `head` format, so pin the real one.
+
+    Qualifying a fork's head a second time sent `upstream:user:branch`, which
+    matches no pull request, so a retry after a lost response could never adopt
+    the PR it had already opened. Only open PRs count: a closed one belongs to
+    an earlier publication, not this one.
+    """
+    import httpx
+
+    from patchpilot.publish.credentials import GITHUB_API
+    from patchpilot.publish.github import GitHubAdapter
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json=[{"number": 7, "html_url": "https://github.com/x/y/pull/7", "state": "open"}],
+        )
+
+    settings.github_token = "test-token"
+    adapter = GitHubAdapter(settings)
+    adapter._client = httpx.AsyncClient(
+        base_url=GITHUB_API, transport=httpx.MockTransport(handler)
+    )
+    try:
+        found = await adapter.find_pull_request(
+            owner=UPSTREAM_OWNER, repo=UPSTREAM_REPO, head=head
+        )
+    finally:
+        await adapter.close()
+
+    assert found is not None and found.number == 7
+    (request,) = seen
+    assert request.url.path == f"/repos/{UPSTREAM_OWNER}/{UPSTREAM_REPO}/pulls"
+    assert request.url.params["head"] == expected
+    assert request.url.params["state"] == "open"

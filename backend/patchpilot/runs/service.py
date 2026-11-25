@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent.result import AgentResult
@@ -174,10 +175,38 @@ async def get_patches(session: AsyncSession, run_id: str) -> list[PatchRow]:
 
 
 async def request_cancel(session: AsyncSession, run_id: str) -> bool:
-    """Ask a running job to stop. The worker checks this flag each iteration."""
+    """Ask a job to stop.
+
+    A run still in the queue is cancelled outright. Merely flagging it let a
+    worker claim it, clone the repository, start the agent and pay for model
+    calls until its first heartbeat noticed. The update is conditional on the
+    run still being PENDING, so it cannot race a worker's claim: whichever
+    lands first wins, and a claimed run falls through to the flag, which the
+    worker honours each iteration.
+    """
     run = await get_run(session, run_id)
     if run is None or RunState(run.state).is_terminal:
         return False
+
+    if RunState(run.state) is RunState.PENDING:
+        claimed_first = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                sa.update(Run)
+                .where(Run.id == run.id, Run.state == str(RunState.PENDING))
+                .values(
+                    state=str(RunState.CANCELLED),
+                    cancel_requested=True,
+                    stop_reason="cancelled before it started",
+                    finished_at=datetime.now(UTC),
+                )
+            ),
+        )
+        if claimed_first.rowcount == 1:
+            await session.refresh(run)
+            return True
+        await session.refresh(run)  # a worker claimed it meanwhile
+
     run.cancel_requested = True
     return True
 

@@ -130,15 +130,27 @@ class ModelProvider(ABC):
         return {"provider": self.name, "model": self.model}
 
 
-#: Published per-million-token prices, used only for an *estimate* that is
-#: labelled as such in the UI. Unknown models yield ``cost_usd=None`` rather
-#: than a fabricated number.
+#: Published per-million-token (input, output) prices, used only for an
+#: *estimate* that is labelled as such in the UI -- and for the run's cost
+#: budget, so an inflated figure stops runs early. Unknown models yield
+#: ``cost_usd=None`` rather than a fabricated number.
 PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # anthropic
-    "claude-opus-5": (15.0, 75.0),
-    "claude-sonnet-5": (3.0, 15.0),
+    "claude-fable-5-2": (8.0, 40.0),
+    "claude-mythos-5-2": (8.0, 40.0),
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-mythos-5-1": (10.0, 50.0),
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-haiku-4-5": (1.0, 5.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
     # openai
     "gpt-4.1": (2.0, 8.0),
     "gpt-4.1-mini": (0.4, 1.6),
@@ -147,17 +159,69 @@ PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "o4-mini": (1.1, 4.4),
 }
 
+#: Cache-read prices that are not the usual 10% of the input price.
+CACHE_READ_USD_PER_MTOK: dict[str, float] = {
+    "claude-fable-5-2": 0.20,
+    "claude-mythos-5-2": 0.20,
+    "claude-opus-5-5": 0.20,
+    "claude-sonnet-5-5": 0.10,
+}
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
-    """Estimate USD cost, or ``None`` when the model's pricing is unknown."""
+#: Models billed at a higher rate once a prompt exceeds a size:
+#: (prompt-token threshold, input price, output price) above it.
+LONG_CONTEXT_USD_PER_MTOK: dict[str, tuple[int, float, float]] = {
+    "claude-haiku-5-5": (100_000, 0.50, 2.50),
+}
+
+_CACHE_READ_FACTOR = 0.10
+_CACHE_WRITE_FACTOR = 1.25  # five-minute TTL, which is what `ephemeral` writes
+
+
+def _lookup(table: dict[str, Any], model: str) -> Any | None:
+    """Exact match, else the *longest* known prefix.
+
+    Longest, not first: `claude-opus-5-5` must not be priced as `claude-opus-5`
+    just because the shorter name happens to be listed earlier.
+    """
     key = model.lower()
-    prices = PRICING_USD_PER_MTOK.get(key)
-    if prices is None:
-        for known, value in PRICING_USD_PER_MTOK.items():
-            if key.startswith(known):
-                prices = value
-                break
+    if key in table:
+        return table[key]
+    matches = [known for known in table if key.startswith(known)]
+    return table[max(matches, key=len)] if matches else None
+
+
+def estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float | None:
+    """Estimate USD cost, or ``None`` when the model's pricing is unknown.
+
+    ``input_tokens`` is the *uncached* remainder, as Anthropic reports it;
+    cached tokens are passed separately and billed at their own rates. A
+    provider whose input count already includes cached tokens (OpenAI) passes
+    neither cache argument.
+    """
+    prices = _lookup(PRICING_USD_PER_MTOK, model)
     if prices is None:
         return None
     input_price, output_price = prices
-    return (input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price
+
+    cache_read_price = _lookup(CACHE_READ_USD_PER_MTOK, model)
+    long_context = _lookup(LONG_CONTEXT_USD_PER_MTOK, model)
+    prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+    if long_context is not None and prompt_tokens > long_context[0]:
+        _, input_price, output_price = long_context
+        cache_read_price = None  # the listed cache price is for the base tier
+    if cache_read_price is None:
+        cache_read_price = input_price * _CACHE_READ_FACTOR
+
+    return (
+        input_tokens * input_price
+        + output_tokens * output_price
+        + cache_read_tokens * cache_read_price
+        + cache_write_tokens * input_price * _CACHE_WRITE_FACTOR
+    ) / 1_000_000

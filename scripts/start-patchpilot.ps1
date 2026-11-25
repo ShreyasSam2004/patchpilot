@@ -82,8 +82,12 @@ if (Test-PortBusy 3000) {
     # only symptom is a port that never opens.
     Write-Output "Frontend SKIPPED - no production build (run: npm run build in frontend/)"
 } else {
+    # Loopback only, like the API. `next start` otherwise listens on every
+    # interface, and its /api rewrite then hands the whole unauthenticated API
+    # -- start runs, spend model credit, publish with the GitHub token -- to
+    # anyone on the same network, undoing the API's own 127.0.0.1 binding.
     Start-Process -FilePath $node `
-        -ArgumentList (Join-Path $frontend 'node_modules\next\dist\bin\next'), 'start', '-p', '3000' `
+        -ArgumentList (Join-Path $frontend 'node_modules\next\dist\bin\next'), 'start', '-p', '3000', '-H', '127.0.0.1' `
         -WorkingDirectory $frontend `
         -RedirectStandardOutput (Join-Path $logs 'web.out.log') `
         -RedirectStandardError  (Join-Path $logs 'web.err.log') `
@@ -94,7 +98,7 @@ if (Test-PortBusy 3000) {
 if ($NoWait) { return }
 
 $apiUp = Wait-ForUrl 'http://127.0.0.1:8000/api/health'
-$webUp = Wait-ForUrl 'http://localhost:3000/'
+$webUp = Wait-ForUrl 'http://127.0.0.1:3000/'
 
 Write-Output ""
 if ($apiUp) { Write-Output "API      ready   http://127.0.0.1:8000" }

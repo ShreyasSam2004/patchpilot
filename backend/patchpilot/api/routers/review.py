@@ -232,6 +232,9 @@ async def request_revision(
     run.finished_at = None
     run.worker_id = None
     run.heartbeat_at = None
+    # A cancel aimed at the previous execution must not cancel this one: the
+    # reviewer is asking for work, and the worker honours the flag on sight.
+    run.cancel_requested = False
 
     await _emit(
         session, run, EventType.PATCH_REVISION_REQUESTED,

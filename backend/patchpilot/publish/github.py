@@ -223,11 +223,24 @@ class GitHubAdapter:
     async def find_pull_request(
         self, *, owner: str, repo: str, head: str
     ) -> PullRequestInfo | None:
+        """The open pull request from ``head`` into ``owner/repo``, if any.
+
+        ``head`` arrives already qualified (``forkowner:branch``) for a fork,
+        and must not be qualified a second time: ``upstream:forkowner:branch``
+        matches nothing, so a retry after a lost response could never adopt the
+        PR it had already opened. Git forbids ``:`` in branch names, so its
+        presence reliably means the owner is already there.
+
+        Open only. A closed PR from an earlier publication of a since-deleted
+        branch of the same name is not this publication's pull request, and
+        adopting it would report a PR that was never opened.
+        """
+        qualified = head if ":" in head else f"{owner}:{head}"
         body = (
             await self._request(
                 "GET",
                 f"/repos/{owner}/{repo}/pulls",
-                params={"head": f"{owner}:{head}", "state": "all"},
+                params={"head": qualified, "state": "open"},
             )
         ).json()
         if not body:

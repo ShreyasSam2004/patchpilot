@@ -283,6 +283,111 @@ async def test_a_failing_run_is_recorded_honestly(e2e, monkeypatch) -> None:
     assert "Could not identify" in detail["summary"]
 
 
+async def test_a_revised_run_records_its_second_execution(e2e, monkeypatch) -> None:
+    """A revision re-executes the same run id; its events must not be lost.
+
+    Event numbers are unique per run. A second execution that numbered its
+    events from 1 again collided with the first execution's, every insert
+    failed, and because the bus deliberately swallows persistence errors the
+    revision ran with no timeline, no tool calls and no test runs on record.
+    """
+    client, settings = e2e
+    install_provider(monkeypatch, calculator_responder)
+    run_id = (
+        await client.post(
+            "/api/runs",
+            json={"issue": "divide crashes on zero" * 3, "fixture": "calculator_bug"},
+        )
+    ).json()["id"]
+    await execute_run(run_id, settings)
+    first = (await client.get(f"/api/runs/{run_id}/events")).json()
+    assert (await client.get(f"/api/runs/{run_id}")).json()["state"] == "RESOLVED"
+
+    # A cancel aimed at the first execution must not stop the revision.
+    from patchpilot.db.models import Run
+    from patchpilot.db.session import session_scope
+
+    async with session_scope(settings) as session:
+        (await session.get(Run, run_id)).cancel_requested = True
+
+    revised = await client.post(
+        f"/api/runs/{run_id}/review/revision",
+        json={"feedback": "Please also cover negative zero.", "reviewer": "alice"},
+    )
+    assert revised.status_code == 200, revised.text
+
+    def revision(messages, index):
+        if index == 0:
+            return ScriptedTurn(tool_calls=[("run_tests", {})])
+        return ScriptedTurn(
+            tool_calls=[("finish", {"resolved": True, "summary": "Reviewed patch re-verified."})]
+        )
+
+    install_provider(monkeypatch, revision)
+    await execute_run(run_id, settings)
+
+    events = (await client.get(f"/api/runs/{run_id}/events")).json()
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+    assert len(events) > len(first), "the revision's events were not recorded"
+    types = [e["type"] for e in events]
+    assert types.count("REPOSITORY_READY") == 2, "the second execution left no trace"
+
+    tools = [c["tool"] for c in (await client.get(f"/api/runs/{run_id}/tools")).json()]
+    assert tools.count("run_tests") == 3, tools
+    tests = (await client.get(f"/api/runs/{run_id}/tests")).json()
+    assert len(tests) == 3 and tests[-1]["green"] is True
+
+    # The restored patch is the revision's change, so re-testing it green is
+    # verification, not "success without an observed green test run".
+    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    assert detail["state"] == "RESOLVED"
+    assert detail["metrics"]["verified_by_tests"] is True
+    assert "without an observed green" not in str(
+        [e["payload"] for e in events if e["type"] == "WARNING"]
+    )
+
+
+async def test_a_docker_run_never_falls_back_to_the_host(e2e, monkeypatch) -> None:
+    """Asking for container isolation and not getting it is a failed run.
+
+    The worker used to degrade to the local sandbox when Docker was down,
+    leaving `sandbox: docker` on the run record while repository code ran on
+    the host as the user. The reason has to reach the user instead.
+    """
+    from patchpilot.errors import SandboxError
+    from patchpilot.sandbox.docker import DockerSandbox
+
+    async def daemon_down(self) -> None:
+        raise SandboxError(
+            "Docker sandbox requested but the daemon is unavailable: test. "
+            "Start Docker, or set PATCHPILOT_SANDBOX=local (weaker isolation)."
+        )
+
+    monkeypatch.setattr(DockerSandbox, "start", daemon_down)
+    client, settings = e2e
+
+    def must_not_run(messages, index):
+        raise AssertionError("the agent must not run without its sandbox")
+
+    install_provider(monkeypatch, must_not_run)
+    run_id = (
+        await client.post(
+            "/api/runs",
+            json={"issue": "divide crashes on zero" * 3, "fixture": "calculator_bug",
+                  "sandbox": "docker"},
+        )
+    ).json()["id"]
+    await execute_run(run_id, settings)
+
+    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    assert detail["state"] == "FAILED"
+    assert detail["stop_reason"].startswith("run could not start:")
+    assert "daemon is unavailable" in detail["stop_reason"]
+    events = (await client.get(f"/api/runs/{run_id}/events")).json()
+    assert "REPOSITORY_READY" not in [e["type"] for e in events]
+
+
 async def test_queue_claims_a_run_exactly_once(e2e) -> None:
     """Two workers racing for one job: exactly one wins."""
     from patchpilot.db.session import session_scope
@@ -311,7 +416,37 @@ async def test_cancelling_a_queued_run(e2e) -> None:
     ).json()["id"]
 
     assert (await client.post(f"/api/runs/{run_id}/cancel")).status_code == 202
-    assert (await client.get(f"/api/runs/{run_id}")).json()["cancel_requested"] is True
+    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    assert detail["cancel_requested"] is True
+    # Still queued, so cancelled outright: no worker may pick it up and pay
+    # for model calls before a heartbeat notices.
+    assert detail["state"] == "CANCELLED"
+    assert (await client.post(f"/api/runs/{run_id}/cancel")).status_code == 409
+
+
+async def test_a_run_cancelled_after_its_claim_never_starts(e2e, monkeypatch) -> None:
+    """The window between a worker's claim and the agent starting."""
+    from patchpilot.db.models import Run
+    from patchpilot.db.session import session_scope
+
+    client, settings = e2e
+
+    def must_not_run(messages, index):
+        raise AssertionError("a cancelled run must not reach the model")
+
+    install_provider(monkeypatch, must_not_run)
+    run_id = (
+        await client.post("/api/runs", json={"issue": "a" * 30, "fixture": "calculator_bug"})
+    ).json()["id"]
+    async with session_scope(settings) as session:
+        run = await session.get(Run, run_id)
+        run.state = "PREPARING"  # as claim_next_run leaves it
+        run.cancel_requested = True
+
+    await execute_run(run_id, settings)
+    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    assert detail["state"] == "CANCELLED"
+    assert detail["stop_reason"] == "cancelled before it started"
 
 
 async def test_fixture_tasks_all_run_end_to_end(e2e, monkeypatch) -> None:

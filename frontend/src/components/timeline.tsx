@@ -242,13 +242,22 @@ export function Timeline({
     );
   }
 
+  // Rows that open a new iteration get a divider. Worked out before rendering
+  // rather than by mutating a variable from inside the map callback, which the
+  // React Compiler cannot reason about.
+  const opensIteration = new Set<string>();
   let lastIteration = -1;
+  for (const row of rows) {
+    if (row.iteration > 0 && row.iteration !== lastIteration) {
+      opensIteration.add(row.key);
+      lastIteration = row.iteration;
+    }
+  }
 
   return (
     <div className="max-h-[640px] overflow-y-auto px-4 py-3">
       {rows.map((row) => {
-        const newIteration = row.iteration > 0 && row.iteration !== lastIteration;
-        if (newIteration) lastIteration = row.iteration;
+        const newIteration = opensIteration.has(row.key);
         return (
           <div key={row.key}>
             {newIteration && (

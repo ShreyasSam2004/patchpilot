@@ -48,6 +48,11 @@ def _workspace(tmp_path: Path, *, guarded: bool) -> Workspace:
         "test_toplevel.py",
         "pkg/thing_test.py",
         "testing/test_helper.py",
+        # Resolve `..` before classifying, as the workspace does before writing:
+        # a scratch-looking prefix must not smuggle a write onto a test file.
+        ".patchpilot/../tests/test_thing.py",
+        "./.patchpilot/../test_toplevel.py",
+        "src/../tests/test_thing.py",
     ],
 )
 def test_a_test_path_is_refused(path: str) -> None:
@@ -80,6 +85,16 @@ def test_write_text_refuses_a_test_file(tmp_path: Path) -> None:
         workspace.write_text("tests/test_thing.py", "def test_x(): assert True\n")
     assert caught.value.code == "write_refused"
     assert not (tmp_path / "tests" / "test_thing.py").exists(), "nothing may be written"
+
+
+def test_a_dotdot_path_through_scratch_space_cannot_reach_a_test(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path, guarded=True)
+    with pytest.raises(ToolError) as caught:
+        workspace.write_text(".patchpilot/../tests/test_thing.py", "def test_x(): pass\n")
+    assert caught.value.code == "write_refused"
+    assert not (tmp_path / "tests" / "test_thing.py").exists()
+    # Scratch space itself is still writable.
+    workspace.write_text(".patchpilot/repro.py", "print(1)\n")
 
 
 def test_write_text_still_allows_source(tmp_path: Path) -> None:
