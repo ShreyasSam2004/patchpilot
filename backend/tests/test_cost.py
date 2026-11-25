@@ -7,7 +7,8 @@ under-reports every turn, since the system prompt is cached on all of them.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -58,9 +59,10 @@ def test_a_long_prompt_moves_to_the_long_context_tier() -> None:
     assert long == pytest.approx((50_000 * 0.50 + 1_000 * 2.50 + 60_000 * 0.05) / M)
 
 
-async def test_the_anthropic_provider_counts_cached_tokens_in_its_estimate() -> None:
+async def test_the_anthropic_provider_counts_cached_tokens_in_its_estimate(
+    monkeypatch,
+) -> None:
     """`input_tokens` is only the uncached remainder; the rest must be billed too."""
-    provider = AnthropicProvider(model="claude-sonnet-5", api_key="test-key")
 
     async def create(**_: object) -> SimpleNamespace:
         return SimpleNamespace(
@@ -75,9 +77,15 @@ async def test_the_anthropic_provider_counts_cached_tokens_in_its_estimate() -> 
             model="claude-sonnet-5",
         )
 
-    provider._client = SimpleNamespace(  # type: ignore[assignment]
-        messages=SimpleNamespace(create=create), close=None
-    )
+    # CI installs only the `dev` extra, so the real SDK is absent there. The
+    # provider imports `AsyncAnthropic` lazily, so a stand-in module lets the
+    # real constructor run without it.
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    fake_sdk = ModuleType("anthropic")
+    fake_sdk.AsyncAnthropic = lambda **_: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", fake_sdk)
+
+    provider = AnthropicProvider(model="claude-sonnet-5", api_key="test-key")
     response = await provider.complete(system="s", messages=[Message(role="user", content="u")])
 
     expected = (1_000 * 2.0 + 500 * 10.0 + 7_000 * 0.2 + 2_000 * 2.5) / M
