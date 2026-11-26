@@ -1,6 +1,6 @@
 import { chromium } from "playwright";
 const b = await chromium.launch();
-const routes = ["/", "/runs", "/runs/new", "/benchmarks", "/settings"];
+const routes = ["/", "/runs", "/runs/new", "/results", "/settings"];
 for (const pass of ["cold", "warm"]) {
   console.log(`  --- ${pass} ---`);
   for (const r of routes) {

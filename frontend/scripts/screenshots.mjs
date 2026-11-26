@@ -59,7 +59,7 @@ await shoot(page, "06-run-tests", `/runs/${resolved.id}`, async (p) => {
   await p.getByRole("tab", { name: /^tests/i }).click();
 });
 await shoot(page, "07-runs-list", "/runs");
-await shoot(page, "08-benchmarks", "/benchmarks");
+await shoot(page, "08-results", "/results");
 await shoot(page, "09-settings", "/settings");
 
 await browser.close();

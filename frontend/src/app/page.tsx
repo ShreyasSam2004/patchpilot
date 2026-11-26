@@ -67,10 +67,10 @@ export default function HomePage() {
               Start autonomous fix
             </Link>
             <Link
-              href="/benchmarks"
+              href="/results"
               className="focus-ring rounded-md border border-[var(--border-strong)] bg-[var(--bg-input)] px-4 py-2 text-[13px] font-medium text-[var(--text)] transition-colors hover:bg-[var(--border)]"
             >
-              Benchmark dashboard
+              SWE-bench results
             </Link>
           </div>
         </div>
@@ -111,10 +111,10 @@ export default function HomePage() {
               </div>
               <div className="border-t border-[var(--border)] px-4 py-3">
                 <Link
-                  href={`/benchmarks/${leaderboard.best.id}`}
+                  href="/results"
                   className="text-[12px] text-[var(--color-accent)] hover:underline"
                 >
-                  View the full benchmark run →
+                  See all results →
                 </Link>
               </div>
             </div>

@@ -12,6 +12,13 @@ const nextConfig = {
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
   },
+  // The Benchmarks section became Results; keep old links and bookmarks working.
+  async redirects() {
+    return [
+      { source: "/benchmarks", destination: "/results", permanent: false },
+      { source: "/benchmarks/:id", destination: "/results", permanent: false },
+    ];
+  },
 };
 
 export default nextConfig;

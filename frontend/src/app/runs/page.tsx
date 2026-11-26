@@ -64,8 +64,7 @@ export default function RunsPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
           <p className="mt-0.5 text-[12px] text-[var(--text-dim)]">
-            {total} run{total === 1 ? "" : "s"} · benchmark tasks are listed under their
-            benchmark
+            {total} run{total === 1 ? "" : "s"} · SWE-bench runs are listed under Results
           </p>
         </div>
         <div className="flex items-center gap-2">

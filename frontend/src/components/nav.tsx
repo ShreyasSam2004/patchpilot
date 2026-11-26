@@ -9,7 +9,7 @@ import { NavLink } from "./ui";
 
 const LINKS = [
   { href: "/runs", label: "Runs" },
-  { href: "/benchmarks", label: "Benchmarks" },
+  { href: "/results", label: "Results" },
   { href: "/settings", label: "Settings" },
 ];
 

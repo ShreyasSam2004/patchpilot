@@ -93,20 +93,6 @@ export interface CreateRunInput {
   max_runtime_s?: number | null;
 }
 
-export interface CreateBenchmarkInput {
-  name?: string | null;
-  dataset?: string | null;
-  split?: string | null;
-  limit?: number | null;
-  instance_ids?: string[] | null;
-  offset?: number;
-  provider?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  max_iterations?: number | null;
-  evaluate?: boolean;
-}
-
 function clean<T extends object>(input: T): Partial<T> {
   return Object.fromEntries(
     Object.entries(input).filter(([, v]) => v !== null && v !== undefined && v !== ""),
@@ -174,30 +160,13 @@ export const api = {
     }),
   getPublication: (id: string) => request<Publication>(`/api/runs/${id}/publication`),
 
-  // -- benchmarks
-  createBenchmark: (input: CreateBenchmarkInput) =>
-    request<Benchmark>("/api/benchmarks", {
-      method: "POST",
-      body: JSON.stringify(clean(input)),
-    }),
+  // -- SWE-bench results (read-only; batches are started from the CLI)
   listBenchmarks: () =>
     request<{ items: Benchmark[]; total: number }>("/api/benchmarks"),
-  getBenchmark: (id: string) => request<Benchmark>(`/api/benchmarks/${id}`),
   getBenchmarkTasks: (id: string) =>
     request<BenchmarkTask[]>(`/api/benchmarks/${id}/tasks`),
   getBenchmarkTask: (id: string, taskId: string) =>
     request<BenchmarkTaskDetail>(`/api/benchmarks/${id}/tasks/${taskId}`),
-  getPredictions: (id: string) =>
-    request<{ instance_id: string; model_name_or_path: string; model_patch: string }[]>(
-      `/api/benchmarks/${id}/predictions`,
-    ),
-  evaluateBenchmark: (id: string) =>
-    request<{ queued: boolean }>(`/api/benchmarks/${id}/evaluate`, { method: "POST" }),
-  cancelBenchmark: (id: string) =>
-    request<{ cancel_requested: boolean }>(`/api/benchmarks/${id}/cancel`, {
-      method: "POST",
-    }),
-  benchmarkPreflight: () => request<Record<string, unknown>>("/api/benchmarks/preflight"),
   leaderboard: () => request<Leaderboard>("/api/benchmarks/leaderboard"),
 
   // -- mcp
