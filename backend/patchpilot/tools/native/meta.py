@@ -120,6 +120,53 @@ def _should_push_for_a_repair(ctx: ToolContext, assessment: PatchAssessment) -> 
     return isinstance(remaining, (int, float)) and remaining >= 0.15
 
 
+#: The review needs room to act on what it finds: a probe, a fix, a test run.
+EDGE_REVIEW_MIN_ITERATIONS = 3
+
+_EDGE_REVIEW = (
+    "One check before this counts as resolved. The issue's example works and your "
+    "tests are green, but the tests that will judge this patch are not all in this "
+    "checkout, and they routinely probe the *edges* of the behaviour you changed. "
+    "That is where otherwise-correct patches fail. Check these with real commands, "
+    "not from memory:\n"
+    "1. EDGES: call the function(s) you changed with the boundary inputs that apply "
+    "to them: zero, negative, fractional or non-integer, infinity, symbolic or "
+    "unknown, empty, None. Each result should be correct, or raise the error this "
+    "codebase uses for invalid input.\n"
+    "2. NEIGHBOURS: read how sibling functions or classes in the same file, and "
+    "anything the issue names as precedent, handle those same inputs: what they "
+    "return and which exception they raise. Follow the same contract.\n"
+    "3. INVERSES: if you added or changed a conversion in one direction (rewrite, "
+    "parse/serialise, encode/decode, to/from), check the reverse direction and the "
+    "round trip, including at those edge inputs.\n"
+    "If everything is already right, call finish again and it will be accepted. If "
+    "you change code, keep the change minimal and consistent with its neighbours, "
+    "and re-run the tests before finishing."
+)
+
+
+def _should_review_edges(ctx: ToolContext) -> bool:
+    """Whether to refuse a first success claim once, for an edge-case review.
+
+    Evidence for it: on a SWE-bench batch every unresolved patch fixed the
+    issue's own example and missed an edge the hidden tests checked -- invalid
+    input its sibling functions already rejected, and a reverse conversion that
+    was wrong at zero. The system prompt already asked "would a nearby input
+    also be handled?"; asked passively, it was not acted on.
+
+    At most once per run, never on the final wrap-up turn (a refusal there would
+    end the run as a timeout), and only with budget left to act on the answer.
+    ``iterations_remaining`` is published by the orchestrator, so a tool called
+    outside an agent loop is never refused.
+    """
+    if not getattr(ctx.settings, "edge_review", True):
+        return False
+    if ctx.state.get("edge_review_used") or ctx.state.get("final_turn"):
+        return False
+    remaining = ctx.state.get("iterations_remaining")
+    return isinstance(remaining, int) and remaining >= EDGE_REVIEW_MIN_ITERATIONS
+
+
 class FinishTool(Tool[FinishArgs]):
     name = "finish"
     description = (
@@ -175,6 +222,9 @@ class FinishTool(Tool[FinishArgs]):
                     "Run the tests again.",
                     code="tests_stale",
                 )
+            if _should_review_edges(ctx):
+                ctx.state["edge_review_used"] = True
+                return ToolResult.failure(_EDGE_REVIEW, code="edge_review")
 
         if not args.resolved and _should_push_for_a_repair(ctx, assessment):
             ctx.state["repair_push_used"] = True

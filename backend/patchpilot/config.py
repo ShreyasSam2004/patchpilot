@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     max_cost_usd: float = 5.0
     max_tool_output_bytes: int = 24_000
     max_file_read_bytes: int = 120_000
+    edge_review: bool = True
+    """Refuse the agent's first success claim once and have it check the edges
+    of the behaviour it changed (boundary inputs, sibling conventions, reverse
+    conversions). Costs one to three iterations on a run that claims success."""
 
     # ---- sandbox -----------------------------------------------------------
     sandbox: SandboxKind = "local"

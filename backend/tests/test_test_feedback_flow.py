@@ -82,6 +82,10 @@ async def _run(settings, tmp_path, run_id: str, output: str, exit_code: int):
     """Edit a source file, then run a command that prints canned runner output."""
     settings.workspace_root = tmp_path / "ws"
     settings.max_iterations = 6
+    # These tests are about how runner output is read. The script gives one
+    # verdict and concedes if it is refused, which cannot also model the
+    # edge-case review that follows a green claim; that has its own tests.
+    settings.edge_review = False
     script = [
         ScriptedTurn(
             text="Patching.",

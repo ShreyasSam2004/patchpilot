@@ -638,6 +638,8 @@ class AgentOrchestrator:
             return False
 
         await self._set_state(RunState.REFLECTING)
+        # Only `finish` is offered here; a refusal would end the run as TIMEOUT.
+        self.tool_state["final_turn"] = True
         self.transcript.add_user(final_turn_message(limit, self._what_we_know()))
 
         response = await self._call_model(system_prompt, [finish_tool])
@@ -971,6 +973,9 @@ class AgentOrchestrator:
         self.tool_state["repair_candidate_file"] = self.progress.best_candidate()
         self.tool_state["budget_fraction_remaining"] = max(
             0.0, (budget - self.budget.iterations) / budget
+        )
+        self.tool_state["iterations_remaining"] = max(
+            0, self.budget.budget.max_iterations - self.budget.iterations
         )
 
     async def _maybe_push_toward_a_patch(self) -> None:

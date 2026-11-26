@@ -32,6 +32,10 @@ observed behaviour, any error message or stack trace, and the components \
 likely involved. Extract concrete identifiers: function names, class names, \
 error types, config keys, URLs.
 
+If the issue's own examples already behave correctly at this commit, do not \
+conclude there is nothing to fix. The issue is describing a *kind* of problem, \
+and the remaining instances of it are in the same code path: find them there.
+
 **B. LOCALISE** — Use `search_code` on those identifiers and `find_symbol` to \
 jump to definitions. Read only the regions that matter, with `read_file` line \
 ranges. Also find the *tests* that cover the code — they tell you the intended \

@@ -102,6 +102,28 @@ async def test_agent_fixes_the_calculator_bug(settings, tmp_path) -> None:
                 ("finish", {"resolved": True, "summary": "Guarded divide() against b == 0."})
             ],
         ),
+        # The first success claim is answered with an edge-case review.
+        ScriptedTurn(
+            text="Probing the edges of divide().",
+            tool_calls=[
+                (
+                    "run_command",
+                    {
+                        "command": [
+                            "python", "-c",
+                            "from src.calculator import divide; "
+                            "print(divide(0, 0), divide(-3, 0), divide(1, 4))",
+                        ]
+                    },
+                )
+            ],
+        ),
+        ScriptedTurn(
+            text="Edges behave.",
+            tool_calls=[
+                ("finish", {"resolved": True, "summary": "Guarded divide() against b == 0."})
+            ],
+        ),
     ]
 
     settings.workspace_root = tmp_path / "ws"
@@ -122,7 +144,9 @@ async def test_agent_fixes_the_calculator_bug(settings, tmp_path) -> None:
 
     assert result.metrics.test_runs == 1
     assert result.metrics.hypotheses == 1
-    assert result.metrics.iterations == 6
+    assert result.metrics.iterations == 8, "five steps, a refused claim, a probe, a finish"
+    finishes = [c for c in result.tool_calls if c.tool == "finish"]
+    assert [c.error_code for c in finishes] == ["edge_review", None]
 
     last = result.last_test_run
     assert last is not None and last.green

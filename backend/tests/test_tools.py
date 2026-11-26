@@ -446,6 +446,69 @@ async def test_finish_refuses_to_claim_success_without_tests(
     assert result.error_code == "untested"
 
 
+def _green_repair(tool_ctx: ToolContext, iterations_remaining: int | None) -> None:
+    """A real source change, a green parsed test run, and the loop's budget."""
+    tool_ctx.workspace.write_text(
+        "src/calc.py",
+        "def add(a, b):\n    return a + b\n\n\n"
+        "def divide(a, b):\n    if b == 0:\n        return None\n    return a / b\n",
+    )
+    tool_ctx.state["last_test_outcome"] = parse_test_output("===== 3 passed in 0.10s =====\n", "", 0)
+    if iterations_remaining is not None:
+        tool_ctx.state["iterations_remaining"] = iterations_remaining
+
+
+async def test_a_first_success_claim_gets_an_edge_case_review(
+    registry: ToolRegistry, tool_ctx: ToolContext
+) -> None:
+    """Every unresolved patch in a graded batch fixed the issue's example and
+    missed an edge its hidden tests checked. The claim is refused once, with a
+    concrete checklist; the second claim is accepted."""
+    _green_repair(tool_ctx, iterations_remaining=10)
+
+    first = await registry.call("finish", tool_ctx, {"resolved": True, "summary": "fixed"})
+    assert not first.ok
+    assert first.error_code == "edge_review"
+    for item in ("EDGES", "NEIGHBOURS", "INVERSES", "call finish again"):
+        assert item in first.content
+    assert "finish_requested" not in tool_ctx.state
+
+    second = await registry.call("finish", tool_ctx, {"resolved": True, "summary": "fixed"})
+    assert second.ok
+    assert tool_ctx.state["finish_resolved"] is True
+
+
+@pytest.mark.parametrize(
+    ("iterations_remaining", "state", "enabled"),
+    [
+        (2, {}, True),  # no room left to act on a review
+        (10, {"final_turn": True}, True),  # a refusal here would end the run as TIMEOUT
+        (10, {}, False),  # switched off in settings
+        (None, {}, True),  # called outside an agent loop
+    ],
+)
+async def test_the_edge_case_review_stands_aside_when_it_cannot_help(
+    registry: ToolRegistry,
+    tool_ctx: ToolContext,
+    iterations_remaining: int | None,
+    state: dict,
+    enabled: bool,
+) -> None:
+    _green_repair(tool_ctx, iterations_remaining)
+    tool_ctx.state.update(state)
+    tool_ctx.settings.edge_review = enabled
+    result = await registry.call("finish", tool_ctx, {"resolved": True, "summary": "fixed"})
+    assert result.ok, result.content
+
+
+async def test_an_honest_failure_is_never_held_for_an_edge_case_review(
+    registry: ToolRegistry, tool_ctx: ToolContext
+) -> None:
+    _green_repair(tool_ctx, iterations_remaining=10)
+    result = await registry.call("finish", tool_ctx, {"resolved": False, "summary": "stuck"})
+    assert result.ok
+
+
 async def test_finish_allows_an_honest_failure(
     registry: ToolRegistry, tool_ctx: ToolContext
 ) -> None:
