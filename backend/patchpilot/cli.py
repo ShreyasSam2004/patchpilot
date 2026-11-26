@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,7 @@ from .agent.orchestrator import AgentTask
 from .agent.session import SessionConfig, run_agent_task
 from .config import get_settings
 from .db.session import dispose_db, init_db, session_scope
-from .domain.enums import EventType, RunState
+from .domain.enums import BenchmarkRunStatus, EventType, RunState
 from .events.bus import Event, MemorySink
 from .fixtures import get_fixture, list_fixtures
 from .ids import new_id
@@ -40,6 +42,21 @@ tools_app = typer.Typer(help="Inspect the tool registry and MCP servers.", no_ar
 app.add_typer(bench_app, name="bench")
 app.add_typer(tools_app, name="tools")
 
+def _utf8_output() -> None:
+    """Make redirected output UTF-8, so the CLI can print its own symbols.
+
+    A Windows console is already UTF-8, but a pipe or a log file gets the
+    legacy code page, which cannot encode the ✓ and — this CLI prints. That
+    crashed `bench run` with output redirected *after* claiming the batch and
+    before running it, leaving it stuck.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+_utf8_output()
 console = Console()
 
 STATE_STYLE = {
@@ -401,6 +418,12 @@ def bench_run(
                 evaluate=evaluate,
                 settings=settings,
             )
+            # Claimed in the same transaction that creates it. Committed as
+            # PENDING, a running API's embedded worker could claim it in the
+            # moment before execute_benchmark did, and both processes would
+            # then work through the same batch and grade it twice.
+            benchmark.status = str(BenchmarkRunStatus.GENERATING)
+            benchmark.started_at = datetime.now(UTC)
             benchmark_id = benchmark.id
             console.print(
                 f"[blue]Benchmark {benchmark_id[:8]}[/] — {benchmark.total_tasks} instances, "
