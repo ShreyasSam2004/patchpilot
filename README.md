@@ -324,8 +324,7 @@ python -m patchpilot.worker
 | `/runs` | Run history |
 | `/runs/new` | Start a run: fixture, repository URL, or local path |
 | `/runs/[id]` | **Live execution workspace** — timeline, files, patch, tests, trace, metrics |
-| `/benchmarks` | Benchmark history and evaluation preflight |
-| `/benchmarks/[id]` | Benchmark dashboard with per-task drill-down |
+| `/results` | Latest SWE-bench Lite batch, graded by the official harness, with per-issue drill-down |
 | `/settings` | Effective configuration, tool registry, permission policy, MCP servers |
 
 ## Running the fixture tasks
@@ -362,7 +361,7 @@ patchpilot bench evaluate <benchmark-id>  # re-grade an existing batch
 patchpilot bench resume-bullet            # resume line from real numbers
 ```
 
-Or from the UI: **Benchmarks → New benchmark run**.
+The graded batch appears on the **Results** page of the UI.
 
 The runner:
 
@@ -443,60 +442,81 @@ upgrade or downgrade does not silently produce "no results". See
 
 ### SWE-bench Lite, 15 instances
 
-Produced by one real batch. Every patch was graded by the official
-`swebench` harness (v5.0.2); PatchPilot never decides its own score.
+Produced by one real batch on 15 SWE-bench Lite instances from `sympy/sympy`.
+Every patch was graded by the official `swebench` harness; PatchPilot never
+decides its own score.
 
 | | |
 |---|---|
-| **Resolved** | **4 / 15 = 26.7%** |
-| Unresolved (patch applied, tests still failed) | 5 |
-| No patch produced (agent hit its iteration budget) | 6 |
+| **Resolved** | **12 / 15 = 80.0%** |
+| Unresolved (patch applied, tests still failed) | 3 |
+| No patch produced | 0 |
 | Harness errors | 0 |
-| Model | `claude-sonnet-5`, effort `high` |
+| Model | `claude-opus-5-5`, effort `high` |
 | Sandbox | Docker, per-instance SWE-bench images, `--network none` |
-| Cost | $6.85 total (~$0.46 per instance) |
-| Agent work | 21.3 iterations and 25.0 tool calls per instance on average |
-| Wall clock | 123 minutes of agent time, plus evaluation |
-| Harness run id | `patchpilot-3gatuz` |
+| Budget per instance | 22 iterations, 100 tool calls, 900 s, $2.00 |
+| Cost | $9.13 total (~$0.61 per instance) |
+| Agent work | 14.7 iterations and 19.9 tool calls per instance on average |
+| Wall clock | 71 minutes of agent time (~4.7 min per instance), plus evaluation |
+| Harness run id | `patchpilot-j6gscv` |
 
-Resolved: `sympy__sympy-12419`, `sympy__sympy-12481`, `sympy__sympy-13471`,
-`sympy__sympy-13480`.
+Resolved: `sympy__sympy-11400`, `-12171`, `-12236`, `-12419`, `-12454`,
+`-12481`, `-13031`, `-13043`, `-13146`, `-13177`, `-13471`, `-13480`.
+Unresolved: `sympy__sympy-11870`, `-11897`, `-13437`.
 
-The denominator is all 15 instances the batch took on, which is the SWE-bench
-convention. An instance the agent gave up on is a failure, not an exclusion --
-scoring only the 9 graded patches would report 44.4% for strictly worse work.
+One instance was retried. On the first attempt the `git clone` for
+`sympy__sympy-12454` stalled for 30 minutes and was killed, so the agent never
+ran: an infrastructure failure, not a model one. It was re-run once with the
+same settings, and its patch was graded like every other.
+
+Fifteen instances from one repository are a sample, not the benchmark: the
+resolve rate over all 300 SWE-bench Lite instances may differ.
 
 Reproduce, or run your own:
 
 ```bash
 patchpilot doctor                # API key, Docker daemon, disk
-patchpilot bench run --limit 15
+PATCHPILOT_MAX_COST_USD=2.0 patchpilot bench run --model claude-opus-5-5 \
+    --max-iterations 22 --instance sympy__sympy-11400 ...   # one --instance per id above
 patchpilot bench resume-bullet   # prints only evaluator-confirmed numbers
 ```
+
+Results appear on the **Results** page of the UI once the harness has graded
+the batch.
 
 #### The agent is a poor judge of its own work
 
 PatchPilot records the agent's own verdict (`agent_status`) separately from the
-harness's (`benchmark_status`), and they disagree badly:
+harness's (`benchmark_status`), and they disagree:
 
-- of the 5 instances the agent declared RESOLVED, the harness confirmed **2**
-- of the 4 it did *not* claim but still left a gradeable patch, the harness
-  found **2 resolved**
+- of the 9 instances the agent declared RESOLVED, the harness confirmed **7**
+- of the 6 it did *not* claim, the harness found **5 resolved**
 
-Self-reported success rate would have been 33%; the real number is 26.7%, and
-it is right for different instances. This is the reason the two columns exist
-and the reason grading is delegated entirely to the official harness.
+Self-reported success rate would have been 60%; the real number is 80%, and it
+is right for different instances. This is the reason the two columns exist and
+the reason grading is delegated entirely to the official harness.
 
-#### Where the 11 failures went
+#### Where the 3 failures went
 
-Six instances produced no patch at all. Five of them stopped at exactly
-iteration 22, the configured cap: the agent spent its entire budget reading and
-hypothesising and never committed an edit. Those are six guaranteed failures
-that never reached the grader, and the single largest lever available -- this
-batch ran deliberately tight (`max_iterations` 22, `max_runtime_s` 900,
-`max_cost_usd` 2.00 per instance) to keep the run affordable.
+All three patches fixed what the issue described and broke nothing: every
+`PASS_TO_PASS` test still passed. Each failed one `FAIL_TO_PASS` test that
+checked an edge the issue never stated:
 
-The other five patches applied cleanly but did not satisfy `FAIL_TO_PASS`.
+- `13437`: `bell(oo)` now evaluates to `oo`, as the issue asked. The hidden test
+  also requires `bell(-1)` and `bell(1/2)` to raise `ValueError`, as four
+  sibling functions in the same file already do.
+- `11870`: the agent added the `sin → sinc` rewrite the issue called for, but
+  left the reverse rewrite `sinc(x) → sin(x)/x` wrong at `x = 0`.
+- `11897`: the issue's examples already printed correctly at the base commit.
+  The agent patched an unrelated case and gave up, missing the remaining
+  instance of the same inconsistency (brackets around a `Piecewise` inside a
+  product).
+
+In response, PatchPilot now refuses the agent's first success claim once and has
+it check boundary inputs, sibling conventions and reverse conversions before
+finishing (`PATCHPILOT_EDGE_REVIEW`). That change was designed from these three
+failures, so its effect has not been measured yet; doing that needs instances it
+was not designed from.
 
 <!-- /RESULTS -->
 
@@ -528,12 +548,14 @@ loop the project exists to build.
 
 Server-parsed unified diff with old/new gutters, rendered or raw.
 
-### Honest empty states
+### SWE-bench results
 
-![Benchmarks](docs/screenshots/08-benchmarks.png)
+![Results](docs/screenshots/08-results.png)
 
-The benchmark dashboard on a machine without Docker: it says exactly what is
-missing and refuses to show a resolve rate rather than defaulting to 0%.
+The latest batch as the official harness graded it, one row per issue, with the
+agent's own verdict beside the official one. The resolve rate is shown only
+once the harness has graded the batch; until then the page says so rather than
+defaulting to 0%.
 
 | | |
 |---|---|
@@ -545,7 +567,7 @@ missing and refuses to show a resolve rate rather than defaulting to 0%.
 
 ```bash
 cd backend
-pytest                       # 213 hermetic tests
+pytest                       # 647 hermetic tests
 pytest -m live               # 6 more that hit the network (opt-in)
 pytest -m "not integration"  # fast unit tests only
 ruff check . && mypy patchpilot
@@ -684,9 +706,9 @@ backend/
     worker/       DB-backed queue and job execution
     workspace/    git workspace with a path jail
   fixtures/       three bug fixtures with task manifests
-  tests/          182 tests
+  tests/          647 tests
 frontend/
-  src/app/        routes: / /runs /runs/new /runs/[id] /benchmarks /benchmarks/[id] /settings
+  src/app/        routes: / /runs /runs/new /runs/[id] /results /settings
   src/components/ ui primitives, timeline, run panels
   src/lib/        typed API client, wire types, formatters
 docs/             architecture · agent loop · MCP · SWE-bench · security · ADRs
